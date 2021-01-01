@@ -450,6 +450,24 @@ std::string vfs::escape(std::string_view name, bool escape_slash)
 			result += c;
 			break;
 		}
+		case '.':
+		case ' ':
+		{
+			if (!get_char(i + 1))
+			{
+				switch (c)
+				{
+				// Directory name ended with a space or a period, not allowed on Windows.
+				case '.': result += reinterpret_cast<const char*>(u8"．"); break;
+				case ' ': result += reinterpret_cast<const char*>(u8" "); break;
+				}
+
+				break;
+			}
+
+			result += c;
+			break;
+		}
 		case char2{u8"！"[0]}:
 		{
 			// Escape full-width characters 0xFF01..0xFF5e with ！ (0xFF01)
@@ -687,6 +705,18 @@ std::string vfs::unescape(std::string_view name)
 				break;
 			}
 			}
+			break;
+		}
+		case char2{u8" "[0]}:
+		{
+			if (get_char(i + 1) == u8" "[1] && get_char(i + 2) == u8" "[2])
+			{
+				result += ' ';
+				i += 2;
+				break;
+			}
+
+			result += c;
 			break;
 		}
 		case 0:
