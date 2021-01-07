@@ -2,6 +2,20 @@
 
 #include "Emu/Memory/vm_ptr.h"
 #include "Emu/Cell/ErrorCodes.h"
+#include "Utilities/File.h"
+#include "Utilities/mutex.h"
+
+struct tty_t
+{
+	fs::file fd;
+	shared_mutex mtx;
+
+	tty_t();
+	~tty_t();
+
+private:
+	u64 m_start_pos = 0;
+};
 
 // TTY channels
 enum

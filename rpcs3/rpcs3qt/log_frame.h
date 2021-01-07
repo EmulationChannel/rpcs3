@@ -56,7 +56,7 @@ private:
 	bool m_stack_log{};
 	bool m_stack_tty{};
 
-	fs::file m_tty_file;
+	usz m_tty_size = 0;
 	QWidget* m_tty_container = nullptr;
 	QPlainTextEdit* m_tty = nullptr;
 	QLineEdit* m_tty_input = nullptr;
