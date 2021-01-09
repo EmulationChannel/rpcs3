@@ -1004,45 +1004,38 @@ namespace vm
 		return block->alloc(size, nullptr, align);
 	}
 
-	u32 falloc(u32 addr, u32 size, memory_location_t location)
+	u32 falloc(u32 addr, u32 size, memory_location_t location, const std::shared_ptr<utils::shm>* src)
 	{
 		const auto block = get(location, addr);
 
 		if (!block)
 		{
-			fmt::throw_exception("Invalid memory location (%u, addr=0x%x)", +location, addr);
+			if (location == any)
+				vm_log.error("vm::dealloc(): Invalid address (addr=0x%x)", addr);
+			else
+				fmt::throw_exception("Invalid memory location (%u, addr=0x%x)", +location, addr);
+
+			return 0;
 		}
 
-		return block->falloc(addr, size);
+		return block->falloc(addr, size, src);
 	}
 
-	u32 dealloc(u32 addr, memory_location_t location)
+	u32 dealloc(u32 addr, memory_location_t location, const std::shared_ptr<utils::shm>* src)
 	{
 		const auto block = get(location, addr);
 
 		if (!block)
 		{
-			fmt::throw_exception("Invalid memory location (%u, addr=0x%x)", +location, addr);
+			if (location == any)
+				vm_log.error("vm::dealloc(): Invalid address (addr=0x%x)", addr);
+			else
+				fmt::throw_exception("Invalid memory location (%u, addr=0x%x)", +location, addr);
+
+			return 0;
 		}
 
-		return block->dealloc(addr);
-	}
-
-	void dealloc_verbose_nothrow(u32 addr, memory_location_t location) noexcept
-	{
-		const auto block = get(location, addr);
-
-		if (!block)
-		{
-			vm_log.error("vm::dealloc(): invalid memory location (%u, addr=0x%x)\n", +location, addr);
-			return;
-		}
-
-		if (!block->dealloc(addr))
-		{
-			vm_log.error("vm::dealloc(): deallocation failed (addr=0x%x)\n", addr);
-			return;
-		}
+		return block->dealloc(addr, src);
 	}
 
 	void lock_sudo(u32 addr, u32 size)
