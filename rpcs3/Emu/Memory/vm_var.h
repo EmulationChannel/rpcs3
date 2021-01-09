@@ -1,258 +1,159 @@
 #pragma once
 
+#include "vm_ptr.h"
+
+#include "util/to_endian.hpp"
+
 namespace vm
 {
-	template<memory_location_t Location = vm::main> class page_alloc_t
+	template <memory_location_t Location = vm::main>
+	struct page_allocator
 	{
-		u32 m_addr;
-
-	public:
-		static inline u32 alloc(u32 size, u32 align)
+		static inline vm::addr_t alloc(u32 size, u32 align)
 		{
-			return vm::alloc(size, Location, std::max<u32>(align, 4096));
+			return vm::cast(vm::alloc(size, Location, std::max<u32>(align, 0x10000)));
+		}
+
+		static inline void dealloc(u32 addr, u32 size = 0) noexcept
+		{
+			return vm::dealloc_verbose_nothrow(addr, Location);
+		}
+	};
+
+	template <typename T>
+	struct stack_allocator
+	{
+		static inline vm::addr_t alloc(u32 size, u32 align)
+		{
+			return vm::cast(T::stack_push(size, align));
 		}
 
 		static inline void dealloc(u32 addr, u32 size) noexcept
 		{
-			return vm::dealloc_verbose_nothrow(addr, Location);
-		}
-
-		page_alloc_t()
-			: m_addr(0)
-		{
-		}
-
-		page_alloc_t(u32 size, u32 align)
-			: m_addr(alloc(size, align))
-		{
-		}
-
-		page_alloc_t(page_alloc_t&& other)
-			: m_addr(other.m_addr)
-		{
-			other.m_addr = 0;
-		}
-
-		~page_alloc_t()
-		{
-			if (m_addr)
-			{
-				dealloc(m_addr, 0);
-			}
-		}
-
-		page_alloc_t& operator =(page_alloc_t&& other)
-		{
-			std::swap(m_addr, other.m_addr);
-
-			return *this;
-		}
-
-		u32 get_addr() const
-		{
-			return m_addr;
+			T::stack_pop_verbose(addr, size);
 		}
 	};
 
-	class stack_alloc_t
+	// General variable base class
+	template <typename T, typename A>
+	class _var_base final : public _ptr_base<T, const u32>
 	{
-		u32 m_addr;
+		using pointer = _ptr_base<T, const u32>;
+
+	public:
+		// Unmoveable object
+		_var_base(const _var_base&) = delete;
+
+		_var_base& operator=(const _var_base&) = delete;
+
+		_var_base()
+		    : pointer(A::alloc(sizeof(T), alignof(T)))
+		{
+		}
+
+		_var_base(const T& right)
+		    : _var_base()
+		{
+			std::memcpy(pointer::get_ptr(), &right, sizeof(T));
+		}
+
+		~_var_base()
+		{
+			if (pointer::addr())
+			{
+				A::dealloc(pointer::addr(), sizeof(T));
+			}
+		}
+	};
+
+	// Dynamic length array variable specialization
+	template <typename T, typename A>
+	class _var_base<T[], A> final : public _ptr_base<T, const u32>
+	{
+		using pointer = _ptr_base<T, const u32>;
+
 		u32 m_size;
 
 	public:
-		static inline u32 alloc(u32 size, u32 align)
+		_var_base(const _var_base&) = delete;
+
+		_var_base& operator=(const _var_base&) = delete;
+
+		_var_base(u32 count)
+		    : pointer(A::alloc(u32{sizeof(T)} * count, alignof(T)))
+		    , m_size(u32{sizeof(T)} * count)
 		{
-			return vm::stack_push(size, align);
 		}
 
-		static inline void dealloc(u32 addr, u32 size)
+		// Initialize via the iterator
+		template <typename I>
+		_var_base(u32 count, I&& it)
+			: _var_base(count)
 		{
-			if (!std::uncaught_exception()) // Don't call during stack unwinding
+			std::copy_n(std::forward<I>(it), count, pointer::get_ptr());
+		}
+
+		~_var_base()
+		{
+			if (pointer::addr())
 			{
-				vm::stack_pop(addr, size);
+				A::dealloc(pointer::addr(), m_size);
 			}
 		}
 
-		stack_alloc_t(u32 size, u32 align)
-			: m_addr(alloc(size, align))
-			, m_size(size)
-		{
-		}
-	
-		~stack_alloc_t() noexcept(false) // Allow exceptions
-		{
-			dealloc(m_addr, m_size);
-		}
-
-		stack_alloc_t(const stack_alloc_t&) = delete; // Delete copy/move constructors and copy/move operators
-
-		u32 get_addr() const
-		{
-			return m_addr;
-		}
-	};
-
-	// _var_base prototype (T - data type, A - allocation traits)
-	template<typename T, typename A> class _var_base;
-
-	// _var_base general specialization (single object of type T)
-	template<typename T, typename A> class _var_base final : public _ptr_base<T, const u32>
-	{
-		using pointer = _ptr_base<T, const u32>;
-
-	public:
-		template<typename... Args, typename = std::enable_if_t<std::is_constructible<T, Args...>::value>> _var_base(Args&&... args)
-			: pointer(A::alloc(sizeof32(T), alignof32(T)), vm::addr)
-		{
-			// Call the constructor with specified arguments
-			new(pointer::get_ptr()) T(std::forward<Args>(args)...);
-		}
-
-		_var_base(const _var_base&) = delete; // Delete copy/move constructors and copy/move operators
-
-		~_var_base() noexcept(noexcept(std::declval<T&>().~T()) && noexcept(A::dealloc(0, 0)))
-		{
-			// Call the destructor
-			pointer::get_ptr()->~T();
-
-			// Deallocate memory
-			A::dealloc(pointer::addr(), sizeof32(T));
-		}
-
-		// Remove operator []
-		std::add_lvalue_reference_t<T> operator [](u32 index) const = delete;
-	};
-
-	// _var_base unknown length array specialization
-	template<typename T, typename A> class _var_base<T[], A> final : public _ptr_base<T, const u32>
-	{
-		using pointer = _ptr_base<T, const u32>;
-
-		u32 m_count;
-
-	public:
-		_var_base(u32 count)
-			: pointer(A::alloc(sizeof32(T) * count, alignof32(T)), vm::addr)
-			, m_count(count)
-		{
-			// Call the default constructor for each element
-			new(pointer::get_ptr()) T[count]();
-		}
-
-		template<typename T2> _var_base(u32 count, T2 it)
-			: pointer(A::alloc(sizeof32(T) * count, alignof32(T)), vm::addr)
-			, m_count(count)
-		{
-			// Initialize each element using iterator
-			std::uninitialized_copy_n<T2>(it, count, const_cast<std::remove_cv_t<T>*>(pointer::get_ptr()));
-		}
-
-		_var_base(const _var_base&) = delete; // Delete copy/move constructors and copy/move operators
-
-		~_var_base() noexcept(noexcept(std::declval<T&>().~T()) && noexcept(A::dealloc(0, 0)))
-		{
-			// Call the destructor for each element
-			for (u32 i = m_count - 1; ~i; i--) pointer::operator [](i).~T();
-
-			// Deallocate memory
-			A::dealloc(pointer::addr(), sizeof32(T) * m_count);
-		}
+		// Remove operator ->
+		T* operator->() const = delete;
 
 		u32 get_count() const
 		{
-			return m_count;
+			return m_size / u32{sizeof(T)};
 		}
 
-		std::add_lvalue_reference_t<T> at(u32 index) const
+		auto begin() const
 		{
-			if (index >= m_count) throw EXCEPTION("Out of range (0x%x >= 0x%x)", index, m_count);
-
-			return pointer::operator [](index);
+			return *this + 0;
 		}
 
-		// Remove operator ->
-		T* operator ->() const = delete;
-	};
-
-	// _var_base fixed length array specialization
-	template<typename T, typename A, u32 N> class _var_base<T[N], A> final : public _ptr_base<T, const u32>
-	{
-		using pointer = _ptr_base<T, const u32>;
-
-	public:
-		_var_base()
-			: pointer(A::alloc(sizeof32(T) * N, alignof32(T)), vm::addr)
+		auto end() const
 		{
-			// Call the default constructor for each element
-			new(pointer::get_ptr()) T[N]();
+			return *this + get_count();
 		}
-
-		template<typename T2> _var_base(const T2(&array)[N])
-			: pointer(A::alloc(sizeof32(T) * N, alignof32(T)), vm::addr)
-		{
-			// Copy the array
-			std::uninitialized_copy_n(array + 0, N, const_cast<std::remove_cv_t<T>*>(pointer::get_ptr()));
-		}
-
-		_var_base(const _var_base&) = delete; // Delete copy/move constructors and copy/move operators
-
-		~_var_base() noexcept(noexcept(std::declval<T&>().~T()) && noexcept(A::dealloc(0, 0)))
-		{
-			// Call the destructor for each element
-			for (u32 i = N - 1; ~i; i--) pointer::operator [](i).~T();
-
-			// Deallocate memory
-			A::dealloc(pointer::addr(), sizeof32(T) * N);
-		}
-
-		constexpr u32 get_count() const
-		{
-			return N;
-		}
-
-		std::add_lvalue_reference_t<T> at(u32 index) const
-		{
-			if (index >= N) throw EXCEPTION("Out of range (0x%x > 0x%x)", index, N);
-
-			return pointer::operator [](index);
-		}
-
-		// Remove operator ->
-		T* operator ->() const = delete;
 	};
 
 	// LE variable
-	template<typename T, typename A = vm::stack_alloc_t> using varl = _var_base<to_le_t<T>, A>;
+	template <typename T, typename A>
+	using varl = _var_base<to_le_t<T>, A>;
 
 	// BE variable
-	template<typename T, typename A = vm::stack_alloc_t> using varb = _var_base<to_be_t<T>, A>;
+	template <typename T, typename A>
+	using varb = _var_base<to_be_t<T>, A>;
 
-	namespace ps3
+	inline namespace ps3_
 	{
 		// BE variable
-		template<typename T, typename A = vm::stack_alloc_t> using var = varb<T, A>;
+		template <typename T, typename A = stack_allocator<ppu_thread>>
+		using var = varb<T, A>;
 
-		// BE variable initialized from value
-		template<typename T> inline varb<T, vm::stack_alloc_t> make_var(const T& value)
+		// Make BE variable initialized from value
+		template <typename T, typename A = stack_allocator<ppu_thread>>
+		[[nodiscard]] auto make_var(const T& value)
 		{
-			return{ value };
+			return (varb<T, A>(value));
 		}
-	}
 
-	namespace psv
-	{
-		// LE variable
-		template<typename T, typename A = vm::stack_alloc_t> using var = varl<T, A>;
-
-		// LE variable initialized from value
-		template<typename T> inline varl<T, vm::stack_alloc_t> make_var(const T& value)
+		// Make char[] variable initialized from std::string
+		template <typename A = stack_allocator<ppu_thread>>
+		[[nodiscard]] auto make_str(const std::string& str)
 		{
-			return{ value };
+			return (_var_base<char[], A>(size32(str) + 1, str.c_str()));
 		}
-	}
 
-	static _var_base<char[], vm::stack_alloc_t> make_str(const std::string& str)
-	{
-		return{ size32(str) + 1, str.data() };
-	}
-}
+		// Global HLE variable
+		template <typename T, uint Count = 1>
+		struct gvar final : ptr<T>
+		{
+			static constexpr u32 alloc_size{sizeof(T) * Count};
+			static constexpr u32 alloc_align{alignof(T)};
+		};
+	} // namespace ps3_
+} // namespace vm

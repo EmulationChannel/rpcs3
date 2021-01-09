@@ -1,16 +1,17 @@
 #include "stdafx.h"
 #include "NullGSRender.h"
-#include "Emu/System.h"
 
-NullGSRender::NullGSRender() : GSRender(frame_type::Null)
+u64 NullGSRender::get_cycles()
+{
+	return thread_ctrl::get_cycles(static_cast<named_thread<NullGSRender>&>(*this));
+}
+
+NullGSRender::NullGSRender() : GSRender()
 {
 }
 
-void NullGSRender::onexit_thread()
+void NullGSRender::end()
 {
-}
-
-bool NullGSRender::domethod(u32 cmd, u32 value)
-{
-	return false;
+	execute_nop_draw();
+	rsx::thread::end();
 }

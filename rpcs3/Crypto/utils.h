@@ -4,7 +4,7 @@
 // Licensed under the terms of the GNU GPL, version 3
 // http://www.gnu.org/licenses/gpl-3.0.txt
 
-#define MAX_PATH 4096
+#include "util/types.hpp"
 
 #include <stdlib.h>
 #include "aes.h"
@@ -12,18 +12,41 @@
 #include "lz.h"
 #include "ec.h"
 
-// Auxiliary functions (endian swap, xor, prng and file name).
-u16 swap16(u16 i);
-u32 swap32(u32 i);
-u64 swap64(u64 i);
-void xor_key(unsigned char *dest, unsigned char *src1, unsigned char *src2, int size);
-void prng(unsigned char *dest, int size);
-char* extract_file_name(const char* file_path, char real_file_name[MAX_PATH]);
+enum { CRYPTO_MAX_PATH = 4096 };
+
+// Auxiliary functions (endian swap, xor, and file name).
+inline u16 swap16(u16 i)
+{
+#if defined(__GNUG__)
+	return __builtin_bswap16(i);
+#else
+	return _byteswap_ushort(i);
+#endif
+}
+
+inline u32 swap32(u32 i)
+{
+#if defined(__GNUG__)
+	return __builtin_bswap32(i);
+#else
+	return _byteswap_ulong(i);
+#endif
+}
+
+inline u64 swap64(u64 i)
+{
+#if defined(__GNUG__)
+	return __builtin_bswap64(i);
+#else
+	return _byteswap_uint64(i);
+#endif
+}
+
+char* extract_file_name(const char* file_path, char real_file_name[CRYPTO_MAX_PATH]);
 
 // Hex string conversion auxiliary functions.
 u64 hex_to_u64(const char* hex_str);
 void hex_to_bytes(unsigned char *data, const char *hex_str, unsigned int str_length);
-bool is_hex(const char* hex_str, unsigned int str_length);
 
 // Crypto functions (AES128-CBC, AES128-ECB, SHA1-HMAC and AES-CMAC).
 void aescbc128_decrypt(unsigned char *key, unsigned char *iv, unsigned char *in, unsigned char *out, int len);

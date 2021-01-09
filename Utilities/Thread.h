@@ -1,443 +1,518 @@
 #pragma once
 
-const class thread_ctrl_t* get_current_thread_ctrl();
+#include "util/types.hpp"
+#include "util/atomic.hpp"
+#include "util/shared_ptr.hpp"
 
-// Named thread control class
-class thread_ctrl_t final
+#include <string>
+#include <memory>
+#include <string_view>
+
+#include "mutex.h"
+#include "lockless.h"
+
+// Hardware core layout
+enum class native_core_arrangement : u32
 {
-	friend class named_thread_t;
+	undefined,
+	generic,
+	intel_ht,
+	amd_ccx
+};
 
-	template<typename T> friend void current_thread_register_atexit(T);
+enum class thread_class : u32
+{
+	general,
+	rsx,
+	spu,
+	ppu
+};
 
-	// Thread handler
-	std::thread m_thread;
+enum class thread_state : u32
+{
+	created = 0,  // Initial state
+	aborting = 1, // The thread has been joined in the destructor or explicitly aborted
+	errored = 2, // Set after the emergency_exit call
+	finished = 3,  // Final state, always set at the end of thread execution
+	mask = 3
+};
 
-	// Name getter
-	const std::function<std::string()> m_name;
+class need_wakeup {};
 
-	// Functions executed at thread exit (temporarily)
-	std::vector<std::function<void()>> m_atexit;
+template <class Context>
+class named_thread;
 
-public:
-	thread_ctrl_t(std::function<std::string()> name)
-		: m_name(std::move(name))
+template <typename T>
+struct result_storage
+{
+	static_assert(std::is_default_constructible_v<T> && noexcept(T()));
+
+	alignas(T) std::byte data[sizeof(T)];
+
+	static constexpr bool empty = false;
+
+	using type = T;
+
+	T* get()
 	{
+		return reinterpret_cast<T*>(&data);
 	}
 
-	thread_ctrl_t(const thread_ctrl_t&) = delete;
+	const T* get() const
+	{
+		return reinterpret_cast<const T*>(&data);
+	}
+
+	void destroy() noexcept
+	{
+		get()->~T();
+	}
+};
+
+template <>
+struct result_storage<void>
+{
+	static constexpr bool empty = true;
+
+	using type = void;
+};
+
+template <class Context, typename... Args>
+using result_storage_t = result_storage<std::invoke_result_t<Context, Args...>>;
+
+template <typename T, typename = void>
+struct thread_thread_name : std::bool_constant<false> {};
+
+template <typename T>
+struct thread_thread_name<T, std::void_t<decltype(named_thread<T>::thread_name)>> : std::bool_constant<true> {};
+
+// Thread base class
+class thread_base
+{
+public:
+	// Native thread entry point function type
+#ifdef _WIN32
+	using native_entry = uint(__stdcall*)(void* arg);
+#else
+	using native_entry = void*(*)(void* arg);
+#endif
+
+	const native_entry entry_point;
+
+private:
+	// Thread handle (platform-specific)
+	atomic_t<u64> m_thread{0};
+
+	// Thread state and cycles
+	atomic_t<u64> m_sync{0};
+
+	// Thread name
+	atomic_ptr<std::string> m_tname;
+
+	// Start thread
+	void start();
+
+	// Called at the thread start
+	void initialize(void (*error_cb)());
+
+	// Called at the thread end, returns self handle
+	u64 finalize(thread_state result) noexcept;
+
+	// Cleanup after possibly deleting the thread instance
+	static native_entry finalize(u64 _self) noexcept;
+
+	// Set name for debugger
+	static void set_name(std::string);
+
+	// Make entry point
+	static native_entry make_trampoline(u64(*)(thread_base*));
+
+	friend class thread_ctrl;
+
+	template <class Context>
+	friend class named_thread;
+
+protected:
+	thread_base(native_entry, std::string_view name);
+
+	~thread_base();
+
+public:
+	// Get CPU cycles since last time this function was called. First call returns 0.
+	u64 get_cycles();
+
+	// Wait for the thread (it does NOT change thread state, and can be called from multiple threads)
+	bool join(bool dtor = false) const;
+
+	// Notify the thread
+	void notify();
+
+	// Get thread id
+	u64 get_native_id() const;
+};
+
+// Collection of global function for current thread
+class thread_ctrl final
+{
+	// Current thread
+	static thread_local thread_base* g_tls_this_thread;
+
+	// Error handling details
+	static thread_local void(*g_tls_error_callback)();
+
+	// Target cpu core layout
+	static atomic_t<native_core_arrangement> g_native_core_layout;
+
+	// Internal waiting function, may throw. Infinite value is -1.
+	static void _wait_for(u64 usec, bool alert);
+
+	friend class thread_base;
+
+	// Optimized get_name() for logging
+	static std::string get_name_cached();
+
+public:
+	// Get current thread name
+	static std::string get_name()
+	{
+		return *g_tls_this_thread->m_tname.load();
+	}
 
 	// Get thread name
-	std::string get_name() const;
+	template <typename T>
+	static std::string get_name(const named_thread<T>& thread)
+	{
+		return *static_cast<const thread_base&>(thread).m_tname.load();
+	}
+
+	// Set current thread name (not recommended)
+	static void set_name(std::string_view name)
+	{
+		g_tls_this_thread->m_tname.store(make_single<std::string>(name));
+	}
+
+	// Set thread name (not recommended)
+	template <typename T>
+	static void set_name(named_thread<T>& thread, std::string_view name)
+	{
+		static_cast<thread_base&>(thread).m_tname.store(make_single<std::string>(name));
+	}
+
+	template <typename T>
+	static u64 get_cycles(named_thread<T>& thread)
+	{
+		return static_cast<thread_base&>(thread).get_cycles();
+	}
+
+	template <typename T>
+	static void notify(named_thread<T>& thread)
+	{
+		static_cast<thread_base&>(thread).notify();
+	}
+
+	template <typename T>
+	static u64 get_native_id(named_thread<T>& thread)
+	{
+		return static_cast<thread_base&>(thread).get_native_id();
+	}
+
+	// Read current state
+	static inline thread_state state()
+	{
+		return static_cast<thread_state>(g_tls_this_thread->m_sync & 3);
+	}
+
+	// Wait once with timeout. May spuriously return false.
+	static inline void wait_for(u64 usec, bool alert = true)
+	{
+		_wait_for(usec, alert);
+	}
+
+	// Wait.
+	static inline void wait()
+	{
+		_wait_for(-1, true);
+	}
+
+	// Exit.
+	[[noreturn]] static void emergency_exit(std::string_view reason);
+
+	// Get current thread (may be nullptr)
+	static thread_base* get_current()
+	{
+		return g_tls_this_thread;
+	}
+
+	// Detect layout
+	static void detect_cpu_layout();
+
+	// Returns a core affinity mask. Set whether to generate the high priority set or not
+	static u64 get_affinity_mask(thread_class group);
+
+	// Sets the native thread priority
+	static void set_native_priority(int priority);
+
+	// Sets the preferred affinity mask for this thread
+	static void set_thread_affinity_mask(u64 mask);
+
+	// Get process affinity mask
+	static u64 get_process_affinity_mask();
+
+	// Miscellaneous
+	static u64 get_thread_affinity_mask();
+
+	// Get current thread stack addr and size
+	static std::pair<void*, usz> get_thread_stack();
+
+private:
+	// Miscellaneous
+	static const u64 process_affinity_mask;
 };
 
-// Register function at thread exit (temporarily)
-template<typename T> void current_thread_register_atexit(T func)
+// Derived from the callable object Context, possibly a lambda
+template <class Context>
+class named_thread final : public Context, result_storage_t<Context>, thread_base
 {
-	extern thread_local thread_ctrl_t* g_tls_this_thread;
+	using result = result_storage_t<Context>;
+	using thread = thread_base;
 
-	g_tls_this_thread->m_atexit.emplace_back(func);
-}
+	static u64 entry_point(thread_base* _base)
+	{
+		return static_cast<named_thread*>(_base)->entry_point2();
+	}
 
-class named_thread_t
-{
-	// Pointer to managed resource (shared with actual thread)
-	std::shared_ptr<thread_ctrl_t> m_thread;
+	u64 entry_point2()
+	{
+		thread::initialize([]()
+		{
+			if constexpr (!result::empty)
+			{
+				// Construct using default constructor in the case of failure
+				new (static_cast<result*>(static_cast<named_thread*>(thread_ctrl::get_current()))->get()) typename result::type();
+			}
+		});
+
+		if constexpr (result::empty)
+		{
+			// No result
+			Context::operator()();
+		}
+		else
+		{
+			// Construct the result using placement new (copy elision should happen)
+			new (result::get()) typename result::type(Context::operator()());
+		}
+
+		return thread::finalize(thread_state::finished);
+	}
+
+	static inline thread::native_entry trampoline = thread::make_trampoline(entry_point);
+
+	friend class thread_ctrl;
 
 public:
-	// Thread mutex for external use
-	std::mutex mutex;
+	// Default constructor
+	template <bool Valid = std::is_default_constructible_v<Context> && thread_thread_name<Context>(), typename = std::enable_if_t<Valid>>
+	named_thread()
+		: Context()
+		, thread(trampoline, Context::thread_name)
+	{
+		thread::start();
+	}
 
-	// Thread condition variable for external use
-	std::condition_variable cv;
+	// Normal forwarding constructor
+	template <typename... Args, typename = std::enable_if_t<std::is_constructible_v<Context, Args&&...>>>
+	named_thread(std::string_view name, Args&&... args)
+		: Context(std::forward<Args>(args)...)
+		, thread(trampoline, name)
+	{
+		thread::start();
+	}
 
-public:
-	// Initialize in empty state
-	named_thread_t() = default;
+	// Lambda constructor, also the implicit deduction guide candidate
+	named_thread(std::string_view name, Context&& f)
+		: Context(std::forward<Context>(f))
+		, thread(trampoline, name)
+	{
+		thread::start();
+	}
 
-	// Create named thread
-	named_thread_t(std::function<std::string()> name, std::function<void()> func);
+	named_thread(const named_thread&) = delete;
 
-	// Deleted copy/move constructors + copy/move operators
-	named_thread_t(const named_thread_t&) = delete;
+	named_thread& operator=(const named_thread&) = delete;
 
-	// Destructor, calls std::terminate if the thread is neither joined nor detached
-	virtual ~named_thread_t();
+	// Wait for the completion and access result (if not void)
+	[[nodiscard]] decltype(auto) operator()()
+	{
+		thread::join();
 
-public:
-	// Get thread name
-	std::string get_name() const;
+		if constexpr (!result::empty)
+		{
+			return *result::get();
+		}
+	}
 
-	// Create named thread (current state must be empty)
-	void start(std::function<std::string()> name, std::function<void()> func);
+	// Wait for the completion and access result (if not void)
+	[[nodiscard]] decltype(auto) operator()() const
+	{
+		thread::join();
 
-	// Detach thread -> empty state
-	void detach();
+		if constexpr (!result::empty)
+		{
+			return *result::get();
+		}
+	}
 
-	// Join thread -> empty state
-	void join();
+	// Access thread state
+	operator thread_state() const
+	{
+		return static_cast<thread_state>(thread::m_sync.load() & 3);
+	}
 
-	// Check whether the thread is not in "empty state"
-	bool joinable() const { return m_thread.operator bool(); }
+	// Try to abort by assigning thread_state::aborting (UB if assigning different state)
+	named_thread& operator=(thread_state s)
+	{
+		if (s == thread_state::aborting && thread::m_sync.fetch_op([](u64& v){ return !(v & 3) && (v |= 1); }).second)
+		{
+			if (s == thread_state::aborting)
+			{
+				thread::m_sync.notify_one(1);
+			}
 
-	// Check whether it is the currently running thread
-	bool is_current() const;
+			if constexpr (std::is_base_of_v<need_wakeup, Context>)
+			{
+				this->wake_up();
+			}
+		}
 
-	// Get internal thread pointer
-	const thread_ctrl_t* get_thread_ctrl() const { return m_thread.get(); }
+		return *this;
+	}
+
+	// Context type doesn't need virtual destructor
+	~named_thread()
+	{
+		// Assign aborting state forcefully
+		operator=(thread_state::aborting);
+		thread::join(true);
+
+		if constexpr (!result::empty)
+		{
+			result::destroy();
+		}
+	}
 };
 
-// Wrapper for named_thread_t, joins automatically in the destructor
-class autojoin_thread_t final
+// Group of named threads, similar to named_thread
+template <class Context>
+class named_thread_group final
 {
-	named_thread_t m_thread;
+	using Thread = named_thread<Context>;
+
+	const u32 m_count;
+
+	Thread* m_threads;
+
+	void init_threads()
+	{
+		m_threads = static_cast<Thread*>(::operator new(sizeof(Thread) * m_count, std::align_val_t{alignof(Thread)}));
+	}
 
 public:
-	autojoin_thread_t(std::function<std::string()> name, std::function<void()> func)
-		: m_thread(std::move(name), std::move(func))
+	// Lambda constructor, also the implicit deduction guide candidate
+	named_thread_group(std::string_view name, u32 count, const Context& f)
+		: m_count(count)
+		, m_threads(nullptr)
 	{
-	}
-
-	autojoin_thread_t(const autojoin_thread_t&) = delete;
-
-	~autojoin_thread_t() noexcept(false) // Allow exceptions
-	{
-		m_thread.join();
-	}
-};
-
-extern const std::function<bool()> SQUEUE_ALWAYS_EXIT;
-extern const std::function<bool()> SQUEUE_NEVER_EXIT;
-
-bool squeue_test_exit();
-
-template<typename T, u32 sq_size = 256>
-class squeue_t
-{
-	struct squeue_sync_var_t
-	{
-		struct
+		if (count == 0)
 		{
-			u32 position : 31;
-			u32 pop_lock : 1;
-		};
-		struct
-		{
-			u32 count : 31;
-			u32 push_lock : 1;
-		};
-	};
-
-	atomic_t<squeue_sync_var_t> m_sync;
-
-	mutable std::mutex m_rcv_mutex;
-	mutable std::mutex m_wcv_mutex;
-	mutable std::condition_variable m_rcv;
-	mutable std::condition_variable m_wcv;
-
-	T m_data[sq_size];
-
-	enum squeue_sync_var_result : u32
-	{
-		SQSVR_OK = 0,
-		SQSVR_LOCKED = 1,
-		SQSVR_FAILED = 2,
-	};
-
-public:
-	squeue_t()
-		: m_sync(squeue_sync_var_t{})
-	{
-	}
-
-	u32 get_max_size() const
-	{
-		return sq_size;
-	}
-
-	bool is_full() const
-	{
-		return m_sync.load().count == sq_size;
-	}
-
-	bool push(const T& data, const std::function<bool()>& test_exit)
-	{
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-			if (sync.count == sq_size)
-			{
-				return SQSVR_FAILED;
-			}
-
-			sync.push_lock = 1;
-			pos = sync.position + sync.count;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> wcv_lock(m_wcv_mutex);
-			m_wcv.wait_for(wcv_lock, std::chrono::milliseconds(1));
+			return;
 		}
 
-		m_data[pos >= sq_size ? pos - sq_size : pos] = data;
+		init_threads();
 
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
+		// Create all threads
+		for (u32 i = 0; i < m_count; i++)
 		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.push_lock);
-			sync.push_lock = 0;
-			sync.count++;
-		});
-
-		m_rcv.notify_one();
-		m_wcv.notify_one();
-		return true;
+			new (static_cast<void*>(m_threads + i)) Thread(std::string(name) + std::to_string(i + 1), f);
+		}
 	}
 
-	bool push(const T& data, const volatile bool* do_exit)
+	// Default constructor
+	named_thread_group(std::string_view name, u32 count)
+		: m_count(count)
+		, m_threads(nullptr)
 	{
-		return push(data, [do_exit](){ return do_exit && *do_exit; });
-	}
-
-	force_inline bool push(const T& data)
-	{
-		return push(data, SQUEUE_NEVER_EXIT);
-	}
-
-	force_inline bool try_push(const T& data)
-	{
-		return push(data, SQUEUE_ALWAYS_EXIT);
-	}
-
-	bool pop(T& data, const std::function<bool()>& test_exit)
-	{
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos](squeue_sync_var_t& sync) -> u32
+		if (count == 0)
 		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (!sync.count)
-			{
-				return SQSVR_FAILED;
-			}
-			if (sync.pop_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			pos = sync.position;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
+			return;
 		}
 
-		data = m_data[pos];
+		init_threads();
 
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
+		// Create all threads
+		for (u32 i = 0; i < m_count; i++)
 		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock);
-			sync.pop_lock = 0;
-			sync.position++;
-			sync.count--;
-			if (sync.position == sq_size)
-			{
-				sync.position = 0;
-			}
-		});
-
-		m_rcv.notify_one();
-		m_wcv.notify_one();
-		return true;
+			new (static_cast<void*>(m_threads + i)) Thread(std::string(name) + std::to_string(i + 1));
+		}
 	}
 
-	bool pop(T& data, const volatile bool* do_exit)
-	{
-		return pop(data, [do_exit](){ return do_exit && *do_exit; });
-	}
+	named_thread_group(const named_thread_group&) = delete;
 
-	force_inline bool pop(T& data)
-	{
-		return pop(data, SQUEUE_NEVER_EXIT);
-	}
+	named_thread_group& operator=(const named_thread_group&) = delete;
 
-	force_inline bool try_pop(T& data)
+	// Wait for completion
+	bool join() const
 	{
-		return pop(data, SQUEUE_ALWAYS_EXIT);
-	}
+		bool result = true;
 
-	bool peek(T& data, u32 start_pos, const std::function<bool()>& test_exit)
-	{
-		assert(start_pos < sq_size);
-		u32 pos = 0;
-
-		while (u32 res = m_sync.atomic_op([&pos, start_pos](squeue_sync_var_t& sync) -> u32
+		for (u32 i = 0; i < m_count; i++)
 		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
+			std::as_const(*std::launder(m_threads + i))();
 
-			if (sync.count <= start_pos)
-			{
-				return SQSVR_FAILED;
-			}
-			if (sync.pop_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			pos = sync.position + start_pos;
-			return SQSVR_OK;
-		}))
-		{
-			if (res == SQSVR_FAILED && (test_exit() || squeue_test_exit()))
-			{
-				return false;
-			}
-
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
+			if (std::as_const(*std::launder(m_threads + i)) != thread_state::finished)
+				result = false;
 		}
 
-		data = m_data[pos >= sq_size ? pos - sq_size : pos];
+		return result;
+	}
 
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
+	// Join and access specific thread
+	auto operator[](u32 index) const
+	{
+		return std::as_const(*std::launder(m_threads + index))();
+	}
+
+	// Join and access specific thread
+	auto operator[](u32 index)
+	{
+		return (*std::launder(m_threads + index))();
+	}
+
+	// Dumb iterator
+	auto begin()
+	{
+		return std::launder(m_threads);
+	}
+
+	// Dumb iterator
+	auto end()
+	{
+		return m_threads + m_count;
+	}
+
+	u32 size() const
+	{
+		return m_count;
+	}
+
+	~named_thread_group()
+	{
+		// Destroy all threads (it should join them)
+		for (u32 i = 0; i < m_count; i++)
 		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock);
-			sync.pop_lock = 0;
-		});
-
-		m_rcv.notify_one();
-		return true;
-	}
-
-	bool peek(T& data, u32 start_pos, const volatile bool* do_exit)
-	{
-		return peek(data, start_pos, [do_exit](){ return do_exit && *do_exit; });
-	}
-
-	force_inline bool peek(T& data, u32 start_pos = 0)
-	{
-		return peek(data, start_pos, SQUEUE_NEVER_EXIT);
-	}
-
-	force_inline bool try_peek(T& data, u32 start_pos = 0)
-	{
-		return peek(data, start_pos, SQUEUE_ALWAYS_EXIT);
-	}
-
-	class squeue_data_t
-	{
-		T* const m_data;
-		const u32 m_pos;
-		const u32 m_count;
-
-		squeue_data_t(T* data, u32 pos, u32 count)
-			: m_data(data)
-			, m_pos(pos)
-			, m_count(count)
-		{
+			std::launder(m_threads + i)->~Thread();
 		}
 
-	public:
-		T& operator [] (u32 index)
-		{
-			assert(index < m_count);
-			index += m_pos;
-			index = index < sq_size ? index : index - sq_size;
-			return m_data[index];
-		}
-	};
-
-	void process(void(*proc)(squeue_data_t data))
-	{
-		u32 pos, count;
-
-		while (m_sync.atomic_op([&pos, &count](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.pop_lock || sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			pos = sync.position;
-			count = sync.count;
-			sync.pop_lock = 1;
-			sync.push_lock = 1;
-			return SQSVR_OK;
-		}))
-		{
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		proc(squeue_data_t(m_data, pos, count));
-
-		m_sync.atomic_op([](squeue_sync_var_t& sync)
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-			assert(sync.pop_lock && sync.push_lock);
-			sync.pop_lock = 0;
-			sync.push_lock = 0;
-		});
-
-		m_wcv.notify_one();
-		m_rcv.notify_one();
-	}
-
-	void clear()
-	{
-		while (m_sync.atomic_op([](squeue_sync_var_t& sync) -> u32
-		{
-			assert(sync.count <= sq_size);
-			assert(sync.position < sq_size);
-
-			if (sync.pop_lock || sync.push_lock)
-			{
-				return SQSVR_LOCKED;
-			}
-
-			sync.pop_lock = 1;
-			sync.push_lock = 1;
-			return SQSVR_OK;
-		}))
-		{
-			std::unique_lock<std::mutex> rcv_lock(m_rcv_mutex);
-			m_rcv.wait_for(rcv_lock, std::chrono::milliseconds(1));
-		}
-
-		m_sync.exchange({});
-		m_wcv.notify_one();
-		m_rcv.notify_one();
+		::operator delete(static_cast<void*>(m_threads), std::align_val_t{alignof(Thread)});
 	}
 };

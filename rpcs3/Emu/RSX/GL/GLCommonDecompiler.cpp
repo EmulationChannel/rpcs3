@@ -1,69 +1,38 @@
 #include "stdafx.h"
 #include "GLCommonDecompiler.h"
 
-std::string getFloatTypeNameImpl(size_t elementCount)
+namespace gl
 {
-	switch (elementCount)
-	{
-	default:
-		abort();
-	case 1:
-		return "float";
-	case 2:
-		return "vec2";
-	case 3:
-		return "vec3";
-	case 4:
-		return "vec4";
-	}
-}
+	static constexpr std::array<std::pair<std::string_view, int>, 17> varying_registers =
+	{{
+		{"diff_color", 1},
+		{"spec_color", 2},
+		{"diff_color1", 3},
+		{"spec_color1", 4},
+		{"fogc", 5},
+		{"fog_c", 5},
+		{"tc0", 6},
+		{"tc1", 7},
+		{"tc2", 8},
+		{"tc3", 9},
+		{"tc4", 10},
+		{"tc5", 11},
+		{"tc6", 12},
+		{"tc7", 13},
+		{"tc8", 14},
+		{"tc9", 15}
+	 }};
 
-std::string getFunctionImpl(FUNCTION f)
-{
-	switch (f)
+	int get_varying_register_location(std::string_view varying_register_name)
 	{
-	default:
-		abort();
-	case FUNCTION::FUNCTION_DP2:
-		return "vec4(dot($0.xy, $1.xy))";
-	case FUNCTION::FUNCTION_DP2A:
-		return "";
-	case FUNCTION::FUNCTION_DP3:
-		return "vec4(dot($0.xyz, $1.xyz))";
-	case FUNCTION::FUNCTION_DP4:
-		return "vec4(dot($0, $1))";
-	case FUNCTION::FUNCTION_DPH:
-		return "vec4(dot(vec4($0.xyz, 1.0), $1))";
-	case FUNCTION::FUNCTION_SFL:
-		return "vec4(0., 0., 0., 0.)";
-	case FUNCTION::FUNCTION_STR:
-		return "vec4(1., 1., 1., 1.)";
-	case FUNCTION::FUNCTION_FRACT:
-		return "fract($0)";
-	case FUNCTION::FUNCTION_TEXTURE_SAMPLE:
-		return "texture($t, $0.xy)";
-	case FUNCTION::FUNCTION_DFDX:
-		return "dFdx($0)";
-	case FUNCTION::FUNCTION_DFDY:
-		return "dFdy($0)";
-	}
-}
+		for (const auto& varying_register : varying_registers)
+		{
+			if (varying_register.first == varying_register_name)
+			{
+				return varying_register.second;
+			}
+		}
 
-std::string compareFunctionImpl(COMPARE f, const std::string &Op0, const std::string &Op1)
-{
-	switch (f)
-	{
-	case COMPARE::FUNCTION_SEQ:
-		return "equal(" + Op0 + ", " + Op1 + ")";
-	case COMPARE::FUNCTION_SGE:
-		return "greaterThanEqual(" + Op0 + ", " + Op1 + ")";
-	case COMPARE::FUNCTION_SGT:
-		return "greaterThan(" + Op0 + ", " + Op1 + ")";
-	case COMPARE::FUNCTION_SLE:
-		return "lessThanEqual(" + Op0 + ", " + Op1 + ")";
-	case COMPARE::FUNCTION_SLT:
-		return "lessThan(" + Op0 + ", " + Op1 + ")";
-	case COMPARE::FUNCTION_SNE:
-		return "notEqual(" + Op0 + ", " + Op1 + ")";
+		fmt::throw_exception("Unknown register name: %s", varying_register_name);
 	}
 }

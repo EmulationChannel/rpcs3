@@ -1,7 +1,5 @@
 #pragma once
 
-struct vfsStream;
-
 struct TROPUSRHeader
 {
 	be_t<u32> magic;         // 81 8F 54 AD
@@ -32,7 +30,7 @@ struct TROPUSREntry4
 	// Entry Contents
 	be_t<u32> trophy_id;     // Trophy ID
 	be_t<u32> trophy_grade;  // This seems interesting
-	be_t<u32> unk5;          // Seems to be FF FF FF FF
+	be_t<u32> trophy_pid;    // (Assuming that this is the platinum link id) FF FF FF FF (-1) = SCE_NP_TROPHY_INVALID_TROPHY_ID
 	char unk6[68];           // Just zeroes?
 };
 
@@ -52,12 +50,23 @@ struct TROPUSREntry6
 	be_t<u64> timestamp1;
 	be_t<u64> timestamp2;
 	char unk6[64];           // Just zeroes?
+
+	// Note: One of the fields should hold a flag showing whether the trophy is hidden or not
 };
 
 class TROPUSRLoader
 {
-	vfsStream* m_file;
-	TROPUSRHeader m_header;
+	enum trophy_grade : u32
+	{
+		unknown  = 0, // SCE_NP_TROPHY_GRADE_UNKNOWN
+		platinum = 1, // SCE_NP_TROPHY_GRADE_PLATINUM
+		gold     = 2, // SCE_NP_TROPHY_GRADE_GOLD
+		silver   = 3, // SCE_NP_TROPHY_GRADE_SILVER
+		bronze   = 4  // SCE_NP_TROPHY_GRADE_BRONZE
+	};
+
+	fs::file m_file;
+	TROPUSRHeader m_header{};
 	std::vector<TROPUSRTableHeader> m_tableHeaders;
 
 	std::vector<TROPUSREntry4> m_table4;
@@ -69,15 +78,15 @@ class TROPUSRLoader
 	virtual bool LoadTables();
 
 public:
-	TROPUSRLoader();
-	~TROPUSRLoader();
-
 	virtual bool Load(const std::string& filepath, const std::string& configpath);
 	virtual bool Save(const std::string& filepath);
-	virtual bool Close();
 
 	virtual u32 GetTrophiesCount();
+	virtual u32 GetUnlockedTrophiesCount();
 
+	virtual u32 GetUnlockedPlatinumID(u32 trophy_id, const std::string& config_path);
+
+	virtual u32 GetTrophyGrade(u32 id);
 	virtual u32 GetTrophyUnlockState(u32 id);
 	virtual u64 GetTrophyTimestamp(u32 id);
 

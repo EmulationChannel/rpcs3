@@ -1,53 +1,69 @@
 #pragma once
 
+#include "Utilities/JIT.h"
 #include "SPURecompiler.h"
 
-namespace asmjit
-{
-	struct JitRuntime;
-	struct X86Compiler;
-	struct X86GpVar;
-	struct X86XmmVar;
-	struct X86Mem;
-	struct Label;
-}
+#include <functional>
+
+union v128;
 
 // SPU ASMJIT Recompiler
-class spu_recompiler : public SPURecompilerBase
+class spu_recompiler : public spu_recompiler_base
 {
-	const std::shared_ptr<asmjit::JitRuntime> m_jit;
-
 public:
 	spu_recompiler();
 
-	virtual void compile(spu_function_t& f) override;
+	virtual void init() override;
+
+	virtual spu_function_t compile(spu_program&&) override;
 
 private:
-	// emitter:
-	asmjit::X86Compiler* c;
+	// ASMJIT runtime
+	::jit_runtime m_asmrt;
 
-	// input:
-	asmjit::X86GpVar* cpu;
-	asmjit::X86GpVar* ls;
+	u32 m_base;
+
+	// emitter:
+	asmjit::X86Assembler* c;
+
+	// arguments:
+	const asmjit::X86Gp* cpu;
+	const asmjit::X86Gp* ls;
+	const asmjit::X86Gp* rip;
+	const asmjit::X86Gp* pc0;
+
+	// Native args or temp variables:
+	const asmjit::X86Gp* arg0;
+	const asmjit::X86Gp* arg1;
+	const asmjit::X86Gp* qw0;
+	const asmjit::X86Gp* qw1;
 
 	// temporary:
-	asmjit::X86GpVar* addr;
-	asmjit::X86GpVar* qw0;
-	asmjit::X86GpVar* qw1;
-	asmjit::X86GpVar* qw2;
-	std::array<asmjit::X86XmmVar*, 6> vec;
+	const asmjit::X86Gp* addr;
+	std::array<const asmjit::X86Xmm*, 16> vec;
 
-	// labels:
-	asmjit::Label* labels; // array[0x10000]
-	asmjit::Label* jt; // jump table resolver (uses *addr)
-	asmjit::Label* end; // function end (return *addr)
+	// workload for the end of function:
+	std::vector<std::function<void()>> after;
+	std::vector<std::function<void()>> consts;
+
+	// Function return label
+	asmjit::Label label_stop;
+
+	// Indirect branch dispatch table
+	asmjit::Label instr_table;
+
+	// All valid instruction labels
+	std::map<u32, asmjit::Label> instr_labels;
+
+	// All emitted 128-bit consts
+	std::map<std::pair<u64, u64>, asmjit::Label> xmm_consts;
 
 	class XmmLink
 	{
-		asmjit::X86XmmVar* m_var;
+		const asmjit::X86Xmm* m_var;
 
 	public:
-		XmmLink(asmjit::X86XmmVar*& xmm_var)
+		XmmLink(const asmjit::X86Xmm*& xmm_var)
 			: m_var(xmm_var)
 		{
 			xmm_var = nullptr;
@@ -55,7 +71,7 @@ private:
 
 		XmmLink(XmmLink&&) = default; // MoveConstructible + delete copy constructor and copy/move operators
 
-		operator asmjit::X86XmmVar&() const
+		operator const asmjit::X86Xmm&() const
 		{
 			return *m_var;
 		}
@@ -71,13 +87,18 @@ private:
 	XmmLink XmmAlloc();
 	XmmLink XmmGet(s8 reg, XmmType type);
 
-	asmjit::X86Mem XmmConst(v128 data);
-	asmjit::X86Mem XmmConst(__m128 data);
-	asmjit::X86Mem XmmConst(__m128i data);
+	asmjit::X86Mem XmmConst(const v128& data);
+	asmjit::X86Mem XmmConst(const __m128& data);
+	asmjit::X86Mem XmmConst(const __m128i& data);
 
-private:
-	void InterpreterCall(spu_opcode_t op);
-	void FunctionCall();
+	asmjit::X86Mem get_pc(u32 addr);
+	void branch_fixed(u32 target, bool absolute = false);
+	void branch_indirect(spu_opcode_t op, bool jt = false, bool ret = true);
+	void branch_set_link(u32 target);
+	void fall(spu_opcode_t op);
+
+public:
+	void UNK(spu_opcode_t op);
 
 	void STOP(spu_opcode_t op);
 	void LNOP(spu_opcode_t op);
@@ -278,8 +299,4 @@ private:
 	void FNMS(spu_opcode_t op);
 	void FMA(spu_opcode_t op);
 	void FMS(spu_opcode_t op);
-
-	void UNK(spu_opcode_t op);
-
-	static const spu_opcode_table_t<void(spu_recompiler::*)(spu_opcode_t)> opcodes;
 };

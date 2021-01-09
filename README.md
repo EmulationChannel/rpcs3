@@ -1,49 +1,40 @@
 RPCS3
 =====
 
-[![Build Status](https://travis-ci.org/RPCS3/rpcs3.svg?branch=master)](https://travis-ci.org/RPCS3/rpcs3)
-[![Build status](https://ci.appveyor.com/api/projects/status/411c4clmiohtx7eo/branch/master?svg=true)](https://ci.appveyor.com/project/rpcs3/rpcs3/branch/master)
-[![Coverity Status](https://img.shields.io/coverity/scan/3960.svg)](https://scan.coverity.com/projects/3960)
-[![Coverage Status](https://coveralls.io/repos/RPCS3/rpcs3/badge.svg)](https://coveralls.io/r/RPCS3/rpcs3)
+[![Azure Build Status](https://dev.azure.com/nekotekina/nekotekina/_apis/build/status/RPCS3.rpcs3?branchName=master)](https://dev.azure.com/nekotekina/nekotekina/_build?definitionId=4&branchName=master)
+[![Cirrus CI - Base Branch Build Status](https://img.shields.io/cirrus/github/RPCS3/rpcs3?label=Cirrus%20CI%20(FreeBSD)&logo=cirrus-ci)](https://cirrus-ci.com/github/RPCS3/rpcs3)
+[![RPCS3 discord server](https://img.shields.io/discord/272035812277878785?color=%237289DA&label=RPCS3%20Discord&logo=discord&logoColor=white)](https://discord.me/rpcs3)
 
-An open-source PlayStation 3 emulator/debugger written in C++.
+The world's first free and open-source PlayStation 3 emulator/debugger, written in C++ for Windows and Linux.
 
-You can find some basic information in the [FAQ](https://github.com/RPCS3/rpcs3/wiki/FAQ). For discussion about this emulator and PS3 emulation please visit the [official forums](http://www.emunewz.net/forum/forumdisplay.php?fid=162).
+You can find some basic information on our [**website**](https://rpcs3.net/). Game info is being populated on the [**Wiki**](https://wiki.rpcs3.net/).
+For discussion about this emulator, PS3 emulation, and game compatibility reports, please visit our [**forums**](https://forums.rpcs3.net) and our [**Discord server**](https://discord.me/RPCS3).
 
+[**Support Lead Developers Nekotekina and kd-11 on Patreon**](https://www.patreon.com/Nekotekina)
 
-### Development
+## Contributing
 
-If you want to contribute please take a took at the [Coding Style](https://github.com/RPCS3/rpcs3/wiki/Coding-Style), [Roadmap](https://github.com/RPCS3/rpcs3/wiki/Roadmap) and [Developer Information](https://github.com/RPCS3/rpcs3/wiki/Developer-Information) pages. You should as well contact any of the developers in the forum in order to know about the current situation of the emulator.
+If you want to help the project but do not code, the best way to help out is to test games and make bug reports. See:
+* [Quickstart](https://rpcs3.net/quickstart)
 
+If you want to contribute as a developer, please take a look at the following pages:
 
-### Dependencies
+* [Coding Style](https://github.com/RPCS3/rpcs3/wiki/Coding-Style)
+* [Developer Information](https://github.com/RPCS3/rpcs3/wiki/Developer-Information)
+* [Roadmap](https://rpcs3.net/roadmap)
 
-__Windows__
-* [Visual Studio 2015](https://www.visualstudio.com/en-us/downloads/download-visual-studio-vs.aspx)
-* [Visual C++ Redistributable Packages for Visual Studio 2015](http://www.microsoft.com/en-us/download/details.aspx?id=48145)
-* [Cmake 3.1.0+](http://www.cmake.org/download/) (optional, required only for LLVM build; add to PATH)
-* [Python](https://www.python.org/downloads/) (optional, required only for LLVM build; add to PATH)
+You should also contact any of the developers in the forums or in the Discord server to learn more about the current state of the emulator.
 
-__Linux__
-* GCC 4.9.0+ or Clang 3.5.0+
-* Debian & Ubuntu: `sudo apt-get install libopenal-dev libwxgtk3.0-dev build-essential libglew-dev`
-* Arch: `sudo pacman -S glew openal wxgtk cmake llvm`
+## Building
 
-__Mac OSX__
-* Xcode 6+ (tested with Xcode 6.4)
-* Install with Homebrew: `brew install glew wxwidgets` (add `llvm36` to that list if you want to build with ppu jit)
-* Remove '-framework QuickTime' from '_ldflags' in /usr/local/bin/wx-config
+See [BUILDING.md](BUILDING.md) for more information about how to setup an environment to build RPCS3.
 
+## Running
 
-### Building
+Check our friendly [quickstart](https://rpcs3.net/quickstart) guide to make sure your computer meets the minimum system requirements to run RPCS3.
 
-To initialize the repository don't forget to execute `git submodule update --init` to pull the wxWidgets source.
-* __Windows__:
-Open the *.SLN* file, and press *Build* > *Rebuild Solution*.
-* __Linux & Mac OSX__:
-If you want to build with LLVM, then LLVM 3.6.2 is required.
-`cd rpcs3 && cmake CMakeLists.txt && make && cd ../` then run with `cd bin && ./rpcs3`.
-If you are on OSX and want to build with llvm don't forget to add `-DLLVM_DIR=/usr/local/opt/llvm36/lib/llvm-3.6/share/llvm/cmake` (or wherever llvm brew was installed) to cmake invocation.
+Don't forget to have your graphics driver up to date and to install the [Visual C++ Redistributable Packages for Visual Studio 2019](https://aka.ms/vs/16/release/VC_redist.x64.exe) if you are a Windows user.
 
-### Support
-* [Donate by PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=MPJ3S9XQXCE3G)
+## License
+
+Most files are licensed under the terms of GNU GPLv2 License; see LICENSE file for details. Some files may be licensed differently; check appropriate file headers for details.

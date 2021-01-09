@@ -1,9 +1,15 @@
 #pragma once
+
 #include "key_vault.h"
+#include "zlib.h"
 
-struct vfsStream;
+#include "util/types.hpp"
+#include "Utilities/File.h"
+#include "util/logs.hpp"
 
-struct AppInfo 
+LOG_CHANNEL(self_log, "SELF");
+
+struct AppInfo
 {
 	u64 authid;
 	u32 vendor_id;
@@ -11,7 +17,7 @@ struct AppInfo
 	u64 version;
 	u64 padding;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show();
 };
 
@@ -24,7 +30,7 @@ struct SectionInfo
 	u32 unknown2;
 	u32 encrypted;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show();
 };
 
@@ -35,7 +41,7 @@ struct SCEVersionInfo
 	u32 size;
 	u32 unknown;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show();
 };
 
@@ -95,7 +101,7 @@ struct ControlInfo
 		} npdrm;
 	};
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show();
 };
 
@@ -148,7 +154,7 @@ struct SectionHash
 	u8 padding[12];
 	u8 hmac_key[64];
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 };
 
 struct CapabilitiesInfo
@@ -163,7 +169,7 @@ struct CapabilitiesInfo
 	u32 unknown4;
 	u32 unknown5;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 };
 
 struct Signature
@@ -172,7 +178,7 @@ struct Signature
 	u8 s[21];
 	u8 padding[6];
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 };
 
 struct SelfSection
@@ -181,7 +187,7 @@ struct SelfSection
 	u64 size;
 	u64 offset;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 };
 
 struct Elf32_Ehdr
@@ -206,7 +212,7 @@ struct Elf32_Ehdr
 	u16 e_shnum;
 	u16 e_shstrndx;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show() {}
 	bool IsLittleEndian() const { return e_data == 1; }
 	bool CheckMagic() const { return e_magic == 0x7F454C46; }
@@ -226,8 +232,8 @@ struct Elf32_Shdr
 	u32 sh_addralign;
 	u32 sh_entsize;
 
-	void Load(vfsStream& f);
-	void LoadLE(vfsStream& f);
+	void Load(const fs::file& f);
+	void LoadLE(const fs::file& f);
 	void Show() {}
 };
 
@@ -242,8 +248,8 @@ struct Elf32_Phdr
 	u32 p_flags;
 	u32 p_align;
 
-	void Load(vfsStream& f);
-	void LoadLE(vfsStream& f);
+	void Load(const fs::file& f);
+	void LoadLE(const fs::file& f);
 	void Show() {}
 };
 
@@ -269,7 +275,7 @@ struct Elf64_Ehdr
 	u16 e_shnum;
 	u16 e_shstrndx;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show() {}
 	bool CheckMagic() const { return e_magic == 0x7F454C46; }
 	u64 GetEntry() const { return e_entry; }
@@ -288,7 +294,7 @@ struct Elf64_Shdr
 	u64 sh_addralign;
 	u64 sh_entsize;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show(){}
 };
 
@@ -303,7 +309,7 @@ struct Elf64_Phdr
 	u64 p_memsz;
 	u64 p_align;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show(){}
 };
 
@@ -317,7 +323,7 @@ struct SceHeader
 	u64 se_hsize;
 	u64 se_esize;
 
-	void Load(vfsStream& f);
+	void Load(const fs::file& f);
 	void Show(){}
 	bool CheckMagic() const { return se_magic == 0x53434500; }
 };
@@ -334,21 +340,56 @@ struct SelfHeader
 	u64 se_controloff;
 	u64 se_controlsize;
 	u64 pad;
-	
-	void Load(vfsStream& f);
+
+	void Load(const fs::file& f);
 	void Show(){}
+};
+
+struct SelfAdditionalInfo
+{
+	bool valid = false;
+	std::vector<ControlInfo> ctrl_info;
+	AppInfo app_info;
+};
+
+class SCEDecrypter
+{
+protected:
+	// Main SELF file stream.
+	const fs::file& sce_f;
+
+	// SCE headers.
+	SceHeader sce_hdr;
+
+	// Metadata structs.
+	MetadataInfo meta_info;
+	MetadataHeader meta_hdr;
+	std::vector<MetadataSectionHeader> meta_shdr;
+
+	// Internal data buffers.
+	std::unique_ptr<u8[]> data_keys;
+	u32 data_keys_length;
+	std::unique_ptr<u8[]> data_buf;
+	u32 data_buf_length;
+
+public:
+	SCEDecrypter(const fs::file& s);
+	std::vector<fs::file> MakeFile();
+	bool LoadHeaders();
+	bool LoadMetadata(const u8 erk[32], const u8 riv[16]);
+	bool DecryptData();
 };
 
 class SELFDecrypter
 {
 	// Main SELF file stream.
-	vfsStream& self_f;
+	const fs::file& self_f;
 
 	// SCE, SELF and APP headers.
 	SceHeader sce_hdr;
 	SelfHeader self_hdr;
 	AppInfo app_info;
-	
+
 	// ELF64 header and program header/section header arrays.
 	Elf64_Ehdr elf64_hdr;
 	std::vector<Elf64_Shdr> shdr64_arr;
@@ -370,26 +411,102 @@ class SELFDecrypter
 	std::vector<MetadataSectionHeader> meta_shdr;
 
 	// Internal data buffers.
-	u8 *data_keys;
+	std::unique_ptr<u8[]> data_keys;
 	u32 data_keys_length;
-	u8 *data_buf;
-	u32 data_buf_length;
+	std::unique_ptr<u8[]> data_buf;
+	u32 data_buf_length = 0;
 
 	// Main key vault instance.
 	KeyVault key_v;
 
 public:
-	SELFDecrypter(vfsStream& s);
-	bool MakeElf(const std::string& elf, bool isElf32);
-	bool LoadHeaders(bool isElf32);
+	SELFDecrypter(const fs::file& s);
+	fs::file MakeElf(bool isElf32);
+	bool LoadHeaders(bool isElf32, SelfAdditionalInfo* out_info = nullptr);
 	void ShowHeaders(bool isElf32);
-	bool LoadMetadata();
+	bool LoadMetadata(u8* klic_key);
 	bool DecryptData();
 	bool DecryptNPDRM(u8 *metadata, u32 metadata_size);
 	bool GetKeyFromRap(u8 *content_id, u8 *npdrm_key);
+
+private:
+	template<typename EHdr, typename SHdr, typename PHdr>
+	void WriteElf(fs::file& e, EHdr ehdr, SHdr shdr, PHdr phdr)
+	{
+		// Set initial offset.
+		u32 data_buf_offset = 0;
+
+		// Write ELF header.
+		WriteEhdr(e, ehdr);
+
+		// Write program headers.
+		for (u32 i = 0; i < ehdr.e_phnum; ++i)
+		{
+			WritePhdr(e, phdr[i]);
+		}
+
+		for (unsigned int i = 0; i < meta_hdr.section_count; i++)
+		{
+			// PHDR type.
+			if (meta_shdr[i].type == 2)
+			{
+				// Decompress if necessary.
+				if (meta_shdr[i].compressed == 2)
+				{
+					const auto filesz = phdr[meta_shdr[i].program_idx].p_filesz;
+
+					// Create a pointer to a buffer for decompression.
+					std::unique_ptr<u8[]> decomp_buf(new u8[filesz]);
+
+					// Create a buffer separate from data_buf to uncompress.
+					std::unique_ptr<u8[]> zlib_buf(new u8[data_buf_length]);
+					memcpy(zlib_buf.get(), data_buf.get(), data_buf_length);
+
+					uLongf decomp_buf_length = ::narrow<uLongf>(filesz);
+
+					// Use zlib uncompress on the new buffer.
+					// decomp_buf_length changes inside the call to uncompress
+					int rv = uncompress(decomp_buf.get(), &decomp_buf_length, zlib_buf.get() + data_buf_offset, data_buf_length);
+
+					// Check for errors (TODO: Probably safe to remove this once these changes have passed testing.)
+					switch (rv)
+					{
+					case Z_MEM_ERROR: self_log.error("MakeELF encountered a Z_MEM_ERROR!"); break;
+					case Z_BUF_ERROR: self_log.error("MakeELF encountered a Z_BUF_ERROR!"); break;
+					case Z_DATA_ERROR: self_log.error("MakeELF encountered a Z_DATA_ERROR!"); break;
+					default: break;
+					}
+
+					// Seek to the program header data offset and write the data.
+					e.seek(phdr[meta_shdr[i].program_idx].p_offset);
+					e.write(decomp_buf.get(), filesz);
+				}
+				else
+				{
+					// Seek to the program header data offset and write the data.
+					e.seek(phdr[meta_shdr[i].program_idx].p_offset);
+					e.write(data_buf.get() + data_buf_offset, meta_shdr[i].data_size);
+				}
+
+				// Advance the data buffer offset by data size.
+				data_buf_offset += ::narrow<u32>(meta_shdr[i].data_size);
+			}
+		}
+
+		// Write section headers.
+		if (self_hdr.se_shdroff != 0)
+		{
+			e.seek(ehdr.e_shoff);
+
+			for (u32 i = 0; i < ehdr.e_shnum; ++i)
+			{
+				WriteShdr(e, shdr[i]);
+			}
+		}
+	}
 };
 
-extern bool IsSelf(const std::string& path);
-extern bool IsSelfElf32(const std::string& path);
-extern bool CheckDebugSelf(const std::string& self, const std::string& elf);
-extern bool DecryptSelf(const std::string& elf, const std::string& self);
+fs::file decrypt_self(fs::file elf_or_self, u8* klic_key = nullptr, SelfAdditionalInfo* additional_info = nullptr);
+bool verify_npdrm_self_headers(const fs::file& self, u8* klic_key = nullptr);
+
+u128 get_default_self_klic();

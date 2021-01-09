@@ -1,58 +1,91 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
-#include "Emu/System.h"
-#include "Emu/FS/VFS.h"
-#include "Emu/FS/vfsFile.h"
+#include "Emu/VFS.h"
 #include "TRP.h"
+#include "Crypto/sha1.h"
+#include "Utilities/StrUtil.h"
 
-TRPLoader::TRPLoader(vfsStream& f) : trp_f(f)
+LOG_CHANNEL(trp_log, "Trophy");
+
+TRPLoader::TRPLoader(const fs::file& f)
+	: trp_f(f)
 {
 }
 
-TRPLoader::~TRPLoader()
+bool TRPLoader::Install(const std::string& dest, bool show)
 {
-	Close();
-}
+	if (!trp_f)
+	{
+		fs::g_tls_error = fs::error::noent;
+		return false;
+	}
 
-bool TRPLoader::Install(std::string dest, bool show)
-{
-	if (!trp_f.IsOpened())
+	fs::g_tls_error = {};
+
+	const std::string& local_path = vfs::get(dest);
+
+	const auto temp = fmt::format(u8"%s.＄temp＄%u", local_path, utils::get_unique_tsc());
+
+	if (!fs::create_dir(temp))
 	{
 		return false;
 	}
 
-	if (!dest.empty() && dest.back() != '/')
-	{
-		dest += '/';
-	}
+	// Save TROPUSR.DAT
+	fs::copy_file(local_path + "/TROPUSR.DAT", temp + "/TROPUSR.DAT", false);
 
-	if (!Emu.GetVFS().ExistsDir(dest))
-	{
-		Emu.GetVFS().CreateDir(dest);
-	}
+	std::vector<char> buffer(65536);
 
+	bool success = true;
 	for (const TRPEntry& entry : m_entries)
 	{
-		char* buffer = new char [(u32)entry.size];
-		trp_f.Seek(entry.offset);
-		trp_f.Read(buffer, entry.size);
-		vfsFile(dest + entry.name, fom::rewrite).Write(buffer, entry.size);
-		delete[] buffer;
+		trp_f.seek(entry.offset);
+		buffer.resize(entry.size);
+		if (!trp_f.read(buffer))
+		{
+			trp_log.error("Failed to read TRPEntry at: offset=0x%x, size=0x%x", entry.offset, entry.size);
+			continue; // ???
+		}
+
+		// Create the file in the temporary directory
+		success = fs::write_file(temp + '/' + vfs::escape(entry.name), fs::create + fs::excl, buffer);
+		if (!success)
+		{
+			break;
+		}
 	}
 
-	return true;
+	if (success)
+	{
+		success = fs::remove_all(local_path) || !fs::is_dir(local_path);
+
+		if (success)
+		{
+			// Atomically create trophy data (overwrite existing data)
+			success = fs::rename(temp, local_path, false);
+		}
+	}
+
+	if (!success)
+	{
+		// Remove temporary directory manually on failure (removed automatically on success)
+		auto old_error = fs::g_tls_error;
+		fs::remove_all(temp);
+		fs::g_tls_error = old_error;
+	}
+
+	return success;
 }
 
 bool TRPLoader::LoadHeader(bool show)
 {
-	if (!trp_f.IsOpened())
+	if (!trp_f)
 	{
 		return false;
 	}
 
-	trp_f.Seek(0);
+	trp_f.seek(0);
 
-	if (trp_f.Read(&m_header, sizeof(TRPHeader)) != sizeof(TRPHeader))
+	if (!trp_f.read(m_header))
 	{
 		return false;
 	}
@@ -64,7 +97,32 @@ bool TRPLoader::LoadHeader(bool show)
 
 	if (show)
 	{
-		LOG_NOTICE(LOADER, "TRP version: 0x%x", m_header.trp_version);
+		trp_log.notice("TRP version: 0x%x", m_header.trp_version);
+	}
+
+	if (m_header.trp_version >= 2)
+	{
+		unsigned char hash[20];
+		std::vector<unsigned char> file_contents(m_header.trp_file_size);
+
+		trp_f.seek(0);
+		if (!trp_f.read(file_contents))
+		{
+			trp_log.notice("Failed verifying checksum");
+		}
+		else
+		{
+			memset(&(reinterpret_cast<TRPHeader*>(file_contents.data()))->sha1, 0, 20);
+			sha1(reinterpret_cast<const unsigned char*>(file_contents.data()), m_header.trp_file_size, hash);
+
+			if (memcmp(hash, m_header.sha1, 20) != 0)
+			{
+				trp_log.error("Invalid checksum of TROPHY.TRP file");
+				return false;
+			}
+		}
+
+		trp_f.seek(sizeof(m_header));
 	}
 
 	m_entries.clear();
@@ -72,18 +130,26 @@ bool TRPLoader::LoadHeader(bool show)
 
 	for (u32 i = 0; i < m_header.trp_files_count; i++)
 	{
-		if (trp_f.Read(&m_entries[i], sizeof(TRPEntry)) != sizeof(TRPEntry))
+		if (!trp_f.read(m_entries[i]))
 		{
 			return false;
 		}
 
 		if (show)
 		{
-			LOG_NOTICE(LOADER, "TRP entry #%d: %s", m_entries[i].name);
+			trp_log.notice("TRP entry #%d: %s", m_entries[i].name);
 		}
 	}
 
 	return true;
+}
+
+u64 TRPLoader::GetRequiredSpace() const
+{
+	const u64 file_size = m_header.trp_file_size;
+	const u64 file_element_size = u64{1} * m_header.trp_files_count * m_header.trp_element_size;
+
+	return file_size - sizeof(m_header) - file_element_size;
 }
 
 bool TRPLoader::ContainsEntry(const char *filename)
@@ -116,16 +182,11 @@ void TRPLoader::RemoveEntry(const char *filename)
 
 void TRPLoader::RenameEntry(const char *oldname, const char *newname)
 {
-	for (const TRPEntry& entry : m_entries)
+	for (TRPEntry& entry : m_entries)
 	{
 		if (!strcmp(entry.name, oldname))
 		{
-			memcpy((void*)entry.name, newname, 32);
+			strcpy_trunc(entry.name, std::string_view(newname));
 		}
 	}
-}
-
-bool TRPLoader::Close()
-{
-	return trp_f.Close();
 }

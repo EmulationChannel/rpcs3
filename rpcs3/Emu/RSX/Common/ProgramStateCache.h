@@ -2,8 +2,14 @@
 
 #include "Emu/RSX/RSXFragmentProgram.h"
 #include "Emu/RSX/RSXVertexProgram.h"
-#include "Utilities/Log.h"
 
+#include "Utilities/hash.h"
+#include "Utilities/mutex.h"
+#include "util/logs.hpp"
+#include "Utilities/span.h"
+
+#include <deque>
+#include <unordered_map>
 
 enum class SHADER_TYPE
 {
@@ -11,174 +17,66 @@ enum class SHADER_TYPE
 	SHADER_TYPE_FRAGMENT
 };
 
-namespace ProgramHashUtil
+namespace program_hash_util
 {
-	// Based on
-	// https://github.com/AlexAltea/nucleus/blob/master/nucleus/gpu/rsx_pgraph.cpp
-	union qword
+	struct vertex_program_utils
 	{
-		u64 dword[2];
-		u32 word[4];
-	};
-
-	struct HashVertexProgram
-	{
-		size_t operator()(const std::vector<u32> &program) const
+		struct vertex_program_metadata
 		{
-			// 64-bit Fowler/Noll/Vo FNV-1a hash code
-			size_t hash = 0xCBF29CE484222325ULL;
-			const qword *instbuffer = (const qword*)program.data();
-			size_t instIndex = 0;
-			bool end = false;
-			for (unsigned i = 0; i < program.size() / 4; i++)
-			{
-				const qword inst = instbuffer[instIndex];
-				hash ^= inst.dword[0];
-				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
-				hash ^= inst.dword[1];
-				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
-				instIndex++;
-			}
-			return hash;
-		}
+			std::bitset<512> instruction_mask;
+			u32 ucode_length;
+			u32 referenced_textures_mask;
+		};
+
+		static usz get_vertex_program_ucode_hash(const RSXVertexProgram &program);
+
+		static vertex_program_metadata analyse_vertex_program(const u32* data, u32 entry, RSXVertexProgram& dst_prog);
 	};
 
-
-	struct VertexProgramCompare
+	struct vertex_program_storage_hash
 	{
-		bool operator()(const std::vector<u32> &binary1, const std::vector<u32> &binary2) const
+		usz operator()(const RSXVertexProgram &program) const;
+	};
+
+	struct vertex_program_compare
+	{
+		bool operator()(const RSXVertexProgram &binary1, const RSXVertexProgram &binary2) const;
+	};
+
+	struct fragment_program_utils
+	{
+		struct fragment_program_metadata
 		{
-			if (binary1.size() != binary2.size()) return false;
-			const qword *instBuffer1 = (const qword*)binary1.data();
-			const qword *instBuffer2 = (const qword*)binary2.data();
-			size_t instIndex = 0;
-			for (unsigned i = 0; i < binary1.size() / 4; i++)
-			{
-				const qword& inst1 = instBuffer1[instIndex];
-				const qword& inst2 = instBuffer2[instIndex];
-				if (inst1.dword[0] != inst2.dword[0] || inst1.dword[1] != inst2.dword[1])
-					return false;
-				instIndex++;
-			}
-			return true;
-		}
-	};
+			u32 program_start_offset;
+			u32 program_ucode_length;
+			u32 program_constants_buffer_length;
+			u16 referenced_textures_mask;
 
-	struct FragmentProgramUtil
-	{
+			bool has_pack_instructions;
+			bool has_branch_instructions;
+			bool is_nop_shader;           // Does this affect Z-pass testing???
+		};
+
 		/**
 		* returns true if the given source Operand is a constant
 		*/
-		static bool isConstant(u32 sourceOperand)
-		{
-			return ((sourceOperand >> 8) & 0x3) == 2;
-		}
+		static bool is_constant(u32 sourceOperand);
 
-		/**
-		* RSX fragment program constants are inlined inside shader code.
-		* This function takes an instruction from a fragment program and
-		* returns an equivalent instruction where inlined constants
-		* are masked.
-		* This allows to hash/compare fragment programs even if their
-		* inlined constants are modified inbetween
-		*/
-		static qword fragmentMaskConstant(const qword &initialQword)
-		{
-			qword result = initialQword;
-			if (isConstant(initialQword.word[1]))
-				result.word[1] = 0;
-			if (isConstant(initialQword.word[2]))
-				result.word[2] = 0;
-			if (isConstant(initialQword.word[3]))
-				result.word[3] = 0;
-			return result;
-		}
+		static usz get_fragment_program_ucode_size(const void* ptr);
 
-		static
-		size_t getFPBinarySize(void *ptr)
-		{
-			const qword *instBuffer = (const qword*)ptr;
-			size_t instIndex = 0;
-			while (true)
-			{
-				const qword& inst = instBuffer[instIndex];
-				bool isSRC0Constant = isConstant(inst.word[1]);
-				bool isSRC1Constant = isConstant(inst.word[2]);
-				bool isSRC2Constant = isConstant(inst.word[3]);
-				bool end = (inst.word[0] >> 8) & 0x1;
+		static fragment_program_metadata analyse_fragment_program(const void* ptr);
 
-				if (isSRC0Constant || isSRC1Constant || isSRC2Constant)
-				{
-					instIndex += 2;
-					if (end)
-						return instIndex * 4 * 4;
-					continue;
-				}
-				instIndex++;
-				if (end)
-					return (instIndex)* 4 * 4;
-			}
-		}
+		static usz get_fragment_program_ucode_hash(const RSXFragmentProgram &program);
 	};
 
-	struct HashFragmentProgram
+	struct fragment_program_storage_hash
 	{
-		size_t operator()(const void *program) const
-		{
-			// 64-bit Fowler/Noll/Vo FNV-1a hash code
-			size_t hash = 0xCBF29CE484222325ULL;
-			const qword *instbuffer = (const qword*)program;
-			size_t instIndex = 0;
-			while (true)
-			{
-				const qword& inst = instbuffer[instIndex];
-				bool end = (inst.word[0] >> 8) & 0x1;
-				if (end)
-					return hash;
-				const qword& maskedInst = FragmentProgramUtil::fragmentMaskConstant(inst);
-				hash ^= maskedInst.dword[0];
-				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
-				hash ^= maskedInst.dword[1];
-				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
-				instIndex++;
-				// Skip constants
-				if (FragmentProgramUtil::isConstant(inst.word[1]) ||
-					FragmentProgramUtil::isConstant(inst.word[2]) ||
-					FragmentProgramUtil::isConstant(inst.word[3]))
-					instIndex++;
-			}
-			return 0;
-		}
+		usz operator()(const RSXFragmentProgram &program) const;
 	};
 
-	struct FragmentProgramCompare
+	struct fragment_program_compare
 	{
-		bool operator()(const void *binary1, const void *binary2) const
-		{
-			const qword *instBuffer1 = (const qword*)binary1;
-			const qword *instBuffer2 = (const qword*)binary2;
-			size_t instIndex = 0;
-			while (true)
-			{
-				const qword& inst1 = instBuffer1[instIndex];
-				const qword& inst2 = instBuffer2[instIndex];
-				bool end = ((inst1.word[0] >> 8) & 0x1) && ((inst2.word[0] >> 8) & 0x1);
-				if (end)
-					return true;
-
-				const qword& maskedInst1 = FragmentProgramUtil::fragmentMaskConstant(inst1);
-				const qword& maskedInst2 = FragmentProgramUtil::fragmentMaskConstant(inst2);
-
-				if (maskedInst1.dword[0] != maskedInst2.dword[0] || maskedInst1.dword[1] != maskedInst2.dword[1])
-					return false;
-				instIndex++;
-				// Skip constants
-				if (FragmentProgramUtil::isConstant(inst1.word[1]) ||
-					FragmentProgramUtil::isConstant(inst1.word[2]) ||
-					FragmentProgramUtil::isConstant(inst1.word[3]))
-					instIndex++;
-			}
-		}
+		bool operator()(const RSXFragmentProgram &binary1, const RSXFragmentProgram &binary2) const;
 	};
 }
 
@@ -193,193 +91,322 @@ namespace ProgramHashUtil
 * - a typedef PipelineProperties to a type that encapsulate various state info relevant to program compilation (alpha test, primitive type,...)
 * - a	typedef ExtraData type that will be passed to the buildProgram function.
 * It should also contains the following function member :
-* - static void RecompileFragmentProgram(RSXFragmentProgram *RSXFP, FragmentProgramData& fragmentProgramData, size_t ID);
-* - static void RecompileVertexProgram(RSXVertexProgram *RSXVP, VertexProgramData& vertexProgramData, size_t ID);
-* - static PipelineData *BuildProgram(VertexProgramData &vertexProgramData, FragmentProgramData &fragmentProgramData, const PipelineProperties &pipelineProperties, const ExtraData& extraData);
-* - void DeleteProgram(PipelineData *ptr);
+* - static void recompile_fragment_program(RSXFragmentProgram *RSXFP, FragmentProgramData& fragmentProgramData, usz ID);
+* - static void recompile_vertex_program(RSXVertexProgram *RSXVP, VertexProgramData& vertexProgramData, usz ID);
+* - static PipelineData build_program(VertexProgramData &vertexProgramData, FragmentProgramData &fragmentProgramData, const PipelineProperties &pipelineProperties, const ExtraData& extraData);
+* - static void validate_pipeline_properties(const VertexProgramData &vertexProgramData, const FragmentProgramData &fragmentProgramData, PipelineProperties& props);
 */
-template<typename BackendTraits>
-class ProgramStateCache
+template<typename backend_traits>
+class program_state_cache
 {
-private:
-	typedef std::unordered_map<std::vector<u32>, typename BackendTraits::VertexProgramData, ProgramHashUtil::HashVertexProgram, ProgramHashUtil::VertexProgramCompare> binary2VS;
-	typedef std::unordered_map<void *, typename BackendTraits::FragmentProgramData, ProgramHashUtil::HashFragmentProgram, ProgramHashUtil::FragmentProgramCompare> binary2FS;
-	binary2VS m_cacheVS;
-	binary2FS m_cacheFS;
+	using pipeline_storage_type = typename backend_traits::pipeline_storage_type;
+	using pipeline_type = typename backend_traits::pipeline_type;
+	using pipeline_properties = typename backend_traits::pipeline_properties;
+	using vertex_program_type = typename backend_traits::vertex_program_type;
+	using fragment_program_type = typename backend_traits::fragment_program_type;
 
-	size_t m_currentShaderId;
-	std::vector<size_t> dummyFragmentConstantCache;
+	using binary_to_vertex_program = std::unordered_map<RSXVertexProgram, vertex_program_type, program_hash_util::vertex_program_storage_hash, program_hash_util::vertex_program_compare> ;
+	using binary_to_fragment_program = std::unordered_map<RSXFragmentProgram, fragment_program_type, program_hash_util::fragment_program_storage_hash, program_hash_util::fragment_program_compare>;
 
-	struct PSOKey
+	struct pipeline_key
 	{
-		u32 vpIdx;
-		u32 fpIdx;
-		typename BackendTraits::PipelineProperties properties;
+		u32 vertex_program_id;
+		u32 fragment_program_id;
+		pipeline_properties properties;
 	};
 
-	struct PSOKeyHash
+	struct pipeline_key_hash
 	{
-		size_t operator()(const PSOKey &key) const
+		usz operator()(const pipeline_key &key) const
 		{
-			size_t hashValue = 0;
-			hashValue ^= std::hash<unsigned>()(key.vpIdx);
-			hashValue ^= std::hash<unsigned>()(key.fpIdx);
-			hashValue ^= std::hash<typename BackendTraits::PipelineProperties>()(key.properties);
+			usz hashValue = 0;
+			hashValue ^= rpcs3::hash_base<unsigned>(key.vertex_program_id);
+			hashValue ^= rpcs3::hash_base<unsigned>(key.fragment_program_id);
+			hashValue ^= rpcs3::hash_struct<pipeline_properties>(key.properties);
 			return hashValue;
 		}
 	};
 
-	struct PSOKeyCompare
+	struct pipeline_key_compare
 	{
-		size_t operator()(const PSOKey &key1, const PSOKey &key2) const
+		bool operator()(const pipeline_key &key1, const pipeline_key &key2) const
 		{
-			return (key1.vpIdx == key2.vpIdx) && (key1.fpIdx == key2.fpIdx) && (key1.properties == key2.properties);
+			return (key1.vertex_program_id == key2.vertex_program_id) && (key1.fragment_program_id == key2.fragment_program_id) && (key1.properties == key2.properties);
 		}
 	};
 
-	std::unordered_map<PSOKey, typename BackendTraits::PipelineData*, PSOKeyHash, PSOKeyCompare> m_cachePSO;
+protected:
+	using decompiler_callback_t = std::function<void(const pipeline_properties&, const RSXVertexProgram&, const RSXFragmentProgram&)>;
 
-	typename BackendTraits::FragmentProgramData& SearchFp(RSXFragmentProgram* rsx_fp, bool& found)
+	shared_mutex m_vertex_mutex;
+	shared_mutex m_fragment_mutex;
+	shared_mutex m_pipeline_mutex;
+	shared_mutex m_decompiler_mutex;
+
+	atomic_t<usz> m_next_id = 0;
+	bool m_cache_miss_flag; // Set if last lookup did not find any usable cached programs
+
+	binary_to_vertex_program m_vertex_shader_cache;
+	binary_to_fragment_program m_fragment_shader_cache;
+	std::unordered_map<pipeline_key, pipeline_storage_type, pipeline_key_hash, pipeline_key_compare> m_storage;
+
+	decompiler_callback_t notify_pipeline_compiled;
+
+	vertex_program_type __null_vertex_program;
+	fragment_program_type __null_fragment_program;
+	pipeline_storage_type __null_pipeline_handle;
+
+	/// bool here to inform that the program was preexisting.
+	std::tuple<const vertex_program_type&, bool> search_vertex_program(const RSXVertexProgram& rsx_vp, bool force_load = true)
 	{
-		typename binary2FS::iterator It = m_cacheFS.find(vm::base(rsx_fp->addr));
-		if (It != m_cacheFS.end())
+		bool recompile = false;
+		vertex_program_type* new_shader;
 		{
-			found = true;
-			return  It->second;
+			reader_lock lock(m_vertex_mutex);
+
+			const auto& I = m_vertex_shader_cache.find(rsx_vp);
+			if (I != m_vertex_shader_cache.end())
+			{
+				return std::forward_as_tuple(I->second, true);
+			}
+
+			if (!force_load)
+			{
+				return std::forward_as_tuple(__null_vertex_program, false);
+			}
+
+			rsx_log.notice("VP not found in buffer!");
+
+			lock.upgrade();
+			auto [it, inserted] = m_vertex_shader_cache.try_emplace(rsx_vp);
+			new_shader = &(it->second);
+			recompile = inserted;
 		}
-		found = false;
-		LOG_WARNING(RSX, "FP not found in buffer!");
-		size_t actualFPSize = ProgramHashUtil::FragmentProgramUtil::getFPBinarySize(vm::base(rsx_fp->addr));
-		void *fpShadowCopy = malloc(actualFPSize);
-		std::memcpy(fpShadowCopy, vm::base(rsx_fp->addr), actualFPSize);
-		typename BackendTraits::FragmentProgramData &newShader = m_cacheFS[fpShadowCopy];
-		BackendTraits::RecompileFragmentProgram(rsx_fp, newShader, m_currentShaderId++);
 
-		return newShader;
-	}
-
-	typename BackendTraits::VertexProgramData& SearchVp(RSXVertexProgram* rsx_vp, bool &found)
-	{
-		typename binary2VS::iterator It = m_cacheVS.find(rsx_vp->data);
-		if (It != m_cacheVS.end())
+		if (recompile)
 		{
-			found = true;
-			return It->second;
+			backend_traits::recompile_vertex_program(rsx_vp, *new_shader, m_next_id++);
 		}
-		found = false;
-		LOG_WARNING(RSX, "VP not found in buffer!");
-		typename BackendTraits::VertexProgramData& newShader = m_cacheVS[rsx_vp->data];
-		BackendTraits::RecompileVertexProgram(rsx_vp, newShader, m_currentShaderId++);
 
-		return newShader;
+		return std::forward_as_tuple(*new_shader, false);
 	}
 
-	typename BackendTraits::PipelineData *GetProg(const PSOKey &psoKey) const
+	/// bool here to inform that the program was preexisting.
+	std::tuple<const fragment_program_type&, bool> search_fragment_program(const RSXFragmentProgram& rsx_fp, bool force_load = true)
 	{
-		typename std::unordered_map<PSOKey, typename BackendTraits::PipelineData *, PSOKeyHash, PSOKeyCompare>::const_iterator It = m_cachePSO.find(psoKey);
-		if (It == m_cachePSO.end())
-			return nullptr;
-		return It->second;
-	}
+		bool recompile = false;
+		fragment_program_type* new_shader;
+		{
+			reader_lock lock(m_fragment_mutex);
 
-	void Add(typename BackendTraits::PipelineData *prog, const PSOKey& PSOKey)
-	{
-		m_cachePSO.insert(std::make_pair(PSOKey, prog));
+			const auto& I = m_fragment_shader_cache.find(rsx_fp);
+			if (I != m_fragment_shader_cache.end())
+			{
+				return std::forward_as_tuple(I->second, true);
+			}
+
+			if (!force_load)
+			{
+				return std::forward_as_tuple(__null_fragment_program, false);
+			}
+
+			rsx_log.notice("FP not found in buffer!");
+
+			lock.upgrade();
+			auto [it, inserted] = m_fragment_shader_cache.try_emplace(rsx_fp);
+			new_shader = &(it->second);
+			recompile = inserted;
+
+			if (inserted)
+			{
+				it->first.clone_data();
+				backend_traits::recompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
+			}
+		}
+
+		return std::forward_as_tuple(*new_shader, false);
 	}
 
 public:
-	ProgramStateCache() : m_currentShaderId(0) {}
-	~ProgramStateCache()
+
+	struct program_buffer_patch_entry
 	{
-		clear();
+		union
+		{
+			u32 hex_key;
+			f32 fp_key;
+		};
+
+		union
+		{
+			u32 hex_value;
+			f32 fp_value;
+		};
+
+		program_buffer_patch_entry() = default;
+
+		program_buffer_patch_entry(f32& key, f32& value)
+		{
+			fp_key = key;
+			fp_value = value;
+		}
+
+		program_buffer_patch_entry(u32& key, u32& value)
+		{
+			hex_key = key;
+			hex_value = value;
+		}
+
+		bool test_and_set(f32 value, f32* dst) const
+		{
+			u32 hex = std::bit_cast<u32>(value);
+			if ((hex & 0x7FFFFFFF) == (hex_key & 0x7FFFFFFF))
+			{
+				hex = (hex & ~0x7FFFFFF) | hex_value;
+				*dst = std::bit_cast<f32>(hex);
+				return true;
+			}
+
+			return false;
+		}
+	};
+
+	struct
+	{
+		std::unordered_map<f32, program_buffer_patch_entry> db;
+
+		void add(program_buffer_patch_entry& e)
+		{
+			db[e.fp_key] = e;
+		}
+
+		void add(f32& key, f32& value)
+		{
+			db[key] = { key, value };
+		}
+
+		void clear()
+		{
+			db.clear();
+		}
+
+		bool is_empty() const
+		{
+			return db.empty();
+		}
+	}
+	patch_table;
+
+public:
+	program_state_cache() = default;
+	~program_state_cache()
+	{}
+
+	template<typename... Args>
+	pipeline_type* get_graphics_pipeline(
+		const RSXVertexProgram& vertexShader,
+		const RSXFragmentProgram& fragmentShader,
+		pipeline_properties& pipelineProperties,
+		bool compile_async,
+		bool allow_notification,
+		Args&& ...args
+		)
+	{
+		const auto &vp_search = search_vertex_program(vertexShader);
+		const auto &fp_search = search_fragment_program(fragmentShader);
+
+		const bool already_existing_fragment_program = std::get<1>(fp_search);
+		const bool already_existing_vertex_program = std::get<1>(vp_search);
+		const vertex_program_type& vertex_program = std::get<0>(vp_search);
+		const fragment_program_type& fragment_program = std::get<0>(fp_search);
+		const pipeline_key key = { vertex_program.id, fragment_program.id, pipelineProperties };
+
+		m_cache_miss_flag = true;
+
+		if (already_existing_vertex_program && already_existing_fragment_program)
+		{
+			// There is a high chance the pipeline object was compiled if the two shaders already existed before
+			backend_traits::validate_pipeline_properties(vertex_program, fragment_program, pipelineProperties);
+
+			reader_lock lock(m_pipeline_mutex);
+			if (const auto I = m_storage.find(key); I != m_storage.end())
+			{
+				m_cache_miss_flag = (I->second == __null_pipeline_handle);
+				return I->second.get();
+			}
+		}
+
+		{
+			std::lock_guard lock(m_pipeline_mutex);
+
+			// Check if another submission completed in the mean time
+			if (const auto I = m_storage.find(key); I != m_storage.end())
+			{
+				m_cache_miss_flag = (I->second == __null_pipeline_handle);
+				return I->second.get();
+			}
+
+			// Insert a placeholder if the key still doesn't exist to avoid re-linking of the same pipeline
+			m_storage[key] = std::move(__null_pipeline_handle);
+		}
+
+		rsx_log.notice("Add program (vp id = %d, fp id = %d)", vertex_program.id, fragment_program.id);
+
+		std::function<pipeline_type* (pipeline_storage_type&)> callback;
+
+		if (allow_notification)
+		{
+			callback = [this, vertexShader, fragmentShader_ = RSXFragmentProgram::clone(fragmentShader), key]
+			(pipeline_storage_type& pipeline) -> pipeline_type*
+			{
+				if (!pipeline)
+				{
+					return nullptr;
+				}
+
+				rsx_log.success("Program compiled successfully");
+				notify_pipeline_compiled(key.properties, vertexShader, fragmentShader_);
+
+				std::lock_guard lock(m_pipeline_mutex);
+				auto& pipe_result = m_storage[key];
+				pipe_result = std::move(pipeline);
+				return pipe_result.get();
+			};
+		}
+		else
+		{
+			callback = [this, key](pipeline_storage_type& pipeline) -> pipeline_type*
+			{
+				if (!pipeline)
+				{
+					return nullptr;
+				}
+
+				std::lock_guard lock(m_pipeline_mutex);
+				auto& pipe_result = m_storage[key];
+				pipe_result = std::move(pipeline);
+				return pipe_result.get();
+			};
+		}
+
+		return backend_traits::build_pipeline(
+			vertex_program,                 // VS, must already be decompiled and recompiled above
+			fragment_program,               // FS, must already be decompiled and recompiled above
+			pipelineProperties,             // Pipeline state
+			compile_async,                  // Allow asynchronous compilation
+			callback,                       // Insertion and notification callback
+			std::forward<Args>(args)...);   // Other arguments
 	}
 
-	const typename BackendTraits::VertexProgramData* get_transform_program(const RSXVertexProgram& rsx_vp) const noexcept
-	{
-		typename binary2VS::const_iterator It = m_cacheVS.find(rsx_vp.data);
-		if (It == m_cacheVS.end())
-			return nullptr;
-		return &It->second;
-	}
-
-	const typename BackendTraits::FragmentProgramData* get_shader_program(const RSXFragmentProgram& rsx_fp) const noexcept
-	{
-		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(rsx_fp.addr));
-		if (It == m_cacheFS.end())
-			return nullptr;
-		return &It->second;
-	}
+	void fill_fragment_constants_buffer(gsl::span<f32> dst_buffer, const RSXFragmentProgram& fragment_program, bool sanitize = false) const;
 
 	void clear()
 	{
-		for (auto pair : m_cachePSO)
-			BackendTraits::DeleteProgram(pair.second);
-		m_cachePSO.clear();
+		std::scoped_lock lock(m_vertex_mutex, m_fragment_mutex, m_decompiler_mutex, m_pipeline_mutex);
 
-		for (auto pair : m_cacheFS)
-			free(pair.first);
-
-		m_cacheFS.clear();
-	}
-
-	typename BackendTraits::PipelineData *getGraphicPipelineState(
-		RSXVertexProgram *vertexShader,
-		RSXFragmentProgram *fragmentShader,
-		const typename BackendTraits::PipelineProperties &pipelineProperties,
-		const typename BackendTraits::ExtraData& extraData
-		)
-	{
-		typename BackendTraits::PipelineData *result = nullptr;
-		bool fpFound, vpFound;
-		typename BackendTraits::VertexProgramData &vertexProg = SearchVp(vertexShader, vpFound);
-		typename BackendTraits::FragmentProgramData &fragmentProg = SearchFp(fragmentShader, fpFound);
-
-		if (fpFound && vpFound)
-		{
-			result = GetProg({ vertexProg.id, fragmentProg.id, pipelineProperties });
-		}
-
-		if (result != nullptr)
-			return result;
-		else
-		{
-			LOG_WARNING(RSX, "Add program :");
-			LOG_WARNING(RSX, "*** vp id = %d", vertexProg.id);
-			LOG_WARNING(RSX, "*** fp id = %d", fragmentProg.id);
-
-			result = BackendTraits::BuildProgram(vertexProg, fragmentProg, pipelineProperties, extraData);
-			Add(result, { vertexProg.id, fragmentProg.id, pipelineProperties });
-		}
-		return result;
-	}
-
-	size_t get_fragment_constants_buffer_size(const RSXFragmentProgram *fragmentShader) const noexcept
-	{
-		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(fragmentShader->addr));
-		if (It != m_cacheFS.end())
-			return It->second.FragmentConstantOffsetCache.size() * 4 * sizeof(float);
-		LOG_ERROR(RSX, "Can't retrieve constant offset cache");
-		return 0;
-	}
-
-	void fill_fragment_constans_buffer(void *buffer, const RSXFragmentProgram *fragment_program) const noexcept
-	{
-		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(fragment_program->addr));
-		if (It == m_cacheFS.end())
-			return;
-		__m128i mask = _mm_set_epi8(0xE, 0xF, 0xC, 0xD,
-			0xA, 0xB, 0x8, 0x9,
-			0x6, 0x7, 0x4, 0x5,
-			0x2, 0x3, 0x0, 0x1);
-
-		size_t offset = 0;
-		for (size_t offset_in_fragment_program : It->second.FragmentConstantOffsetCache)
-		{
-			void *data = vm::base(fragment_program->addr + (u32)offset_in_fragment_program);
-			const __m128i &vector = _mm_loadu_si128((__m128i*)data);
-			const __m128i &shuffled_vector = _mm_shuffle_epi8(vector, mask);
-			_mm_stream_si128((__m128i*)((char*)buffer + offset), shuffled_vector);
-			offset += 4 * sizeof(u32);
-		}
+		notify_pipeline_compiled = {};
+		m_fragment_shader_cache.clear();
+		m_vertex_shader_cache.clear();
+		m_storage.clear();
 	}
 };

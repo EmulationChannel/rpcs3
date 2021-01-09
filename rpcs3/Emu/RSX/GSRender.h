@@ -1,42 +1,19 @@
 #pragma once
+
+#include "GSFrameBase.h"
 #include "Emu/RSX/RSXThread.h"
-#include <memory>
 
-using draw_context_t = std::shared_ptr<void>;
-
-class GSFrameBase
+enum wm_event
 {
-protected:
-	std::wstring m_title_message;
-
-public:
-	GSFrameBase() = default;
-	GSFrameBase(const GSFrameBase&) = delete;
-
-	virtual void close() = 0;
-	virtual bool shown() = 0;
-	virtual void hide() = 0;
-	virtual void show() = 0;
-
-	draw_context_t new_context();
-
-	virtual void set_current(draw_context_t ctx) = 0;
-	virtual void flip(draw_context_t ctx) = 0;
-	virtual size2i client_size() = 0;
-
-	virtual void* handle() const = 0;
-	void title_message(const std::wstring&);
-
-protected:
-	virtual void delete_context(void* ctx) = 0;
-	virtual void* make_context() = 0;
-};
-
-enum class frame_type
-{
-	Null,
-	OpenGL,
-	DX12
+	none,                        // nothing
+	toggle_fullscreen,           // user is requesting a fullscreen switch
+	geometry_change_notice,      // about to start resizing and/or moving the window
+	geometry_change_in_progress, // window being resized and/or moved
+	window_resized,              // window was resized
+	window_minimized,            // window was minimized
+	window_restored,             // window was restored from a minimized state
+	window_moved,                // window moved without resize
+	window_visibility_changed
 };
 
 class GSRender : public rsx::thread
@@ -46,12 +23,14 @@ protected:
 	draw_context_t m_context;
 
 public:
-	GSRender(frame_type type);
-	virtual ~GSRender();
+	GSRender();
+	~GSRender() override;
 
-	void oninit() override;
-	void oninit_thread() override;
+	void on_init_rsx() override;
+	void on_init_thread() override;
+	void on_exit() override;
 
-	void close();
-	void flip(int buffer) override;
+	void flip(const rsx::display_flip_info_t& info) override;
+
+	GSFrameBase* get_frame() { return m_frame; }
 };

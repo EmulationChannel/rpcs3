@@ -1,30 +1,28 @@
 #pragma once
 
+#include <pugixml.hpp>
+#include <memory>
+
 struct rXmlNode
 {
 	rXmlNode();
-	rXmlNode(void *);
-	rXmlNode(const rXmlNode& other);
-	rXmlNode &operator=(const rXmlNode& other);
-	~rXmlNode();
+	rXmlNode(const pugi::xml_node &);
 	std::shared_ptr<rXmlNode> GetChildren();
 	std::shared_ptr<rXmlNode> GetNext();
 	std::string GetName();
 	std::string GetAttribute( const std::string &name);
 	std::string GetNodeContent();
 
-	void *handle;
-	bool ownPtr;
+	pugi::xml_node handle;
 };
 
 struct rXmlDocument
 {
 	rXmlDocument();
-	rXmlDocument(const rXmlDocument& other);
-	rXmlDocument &operator=(const rXmlDocument& other);
-	~rXmlDocument();
-	void Load(const std::string & path);
+	rXmlDocument(const rXmlDocument& other) = delete;
+	rXmlDocument &operator=(const rXmlDocument& other) = delete;
+	void Read(const std::string& data);
 	std::shared_ptr<rXmlNode> GetRoot();
 
-	void *handle;
+	pugi::xml_document handle;
 };

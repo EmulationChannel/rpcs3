@@ -5,20 +5,10 @@
 class NullMouseHandler final : public MouseHandlerBase
 {
 public:
-	NullMouseHandler()
+	void Init(const u32 max_connect) override
 	{
-	}
-
-	virtual void Init(const u32 max_connect)
-	{
-		memset(&m_info, 0, sizeof(MouseInfo));
+		m_info = {};
 		m_info.max_connect = max_connect;
-		m_mice.clear();
-	}
-
-	virtual void Close()
-	{
-		memset(&m_info, 0, sizeof(MouseInfo));
 		m_mice.clear();
 	}
 };

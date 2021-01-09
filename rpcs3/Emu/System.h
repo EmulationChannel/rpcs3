@@ -1,114 +1,101 @@
 #pragma once
 
-#include "Loader/Loader.h"
-#include "DbgCommand.h"
+#include "util/types.hpp"
+#include "util/atomic.hpp"
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
-//just for frame_type
-//TODO: provide better way
-#include "Emu/RSX/GSRender.h"
+u64 get_system_time();
+u64 get_guest_system_time();
+
+enum class localized_string_id;
+enum class video_renderer;
+
+enum class system_state
+{
+	running,
+	paused,
+	stopped,
+	ready,
+};
+
+enum class game_boot_result : u32
+{
+	no_errors,
+	generic_error,
+	nothing_to_boot,
+	wrong_disc_location,
+	invalid_file_or_folder,
+	install_failed,
+	decryption_error,
+	file_creation_error,
+	firmware_missing,
+	unsupported_disc_type
+};
 
 struct EmuCallbacks
 {
 	std::function<void(std::function<void()>)> call_after;
-	std::function<void()> process_events;
-	std::function<void(DbgCommand, class CPUThread*)> send_dbg_command;
-	std::function<std::unique_ptr<class KeyboardHandlerBase>()> get_kb_handler;
-	std::function<std::unique_ptr<class MouseHandlerBase>()> get_mouse_handler;
-	std::function<std::unique_ptr<class PadHandlerBase>()> get_pad_handler;
-	std::function<std::unique_ptr<class GSFrameBase>(frame_type)> get_gs_frame;
-	std::function<std::unique_ptr<class MsgDialogBase>()> get_msg_dialog;
+	std::function<void(bool)> on_run; // (start_playtime) continuing or going ingame, so start the clock
+	std::function<void()> on_pause;
+	std::function<void()> on_resume;
+	std::function<void()> on_stop;
+	std::function<void()> on_ready;
+	std::function<bool()> on_missing_fw;
+	std::function<bool(bool, std::function<void()>)> try_to_quit; // (force_quit, on_exit) Try to close RPCS3
+	std::function<void(s32, s32)> handle_taskbar_progress; // (type, value) type: 0 for reset, 1 for increment, 2 for set_limit
+	std::function<void()> init_kb_handler;
+	std::function<void()> init_mouse_handler;
+	std::function<void(std::string_view title_id)> init_pad_handler;
+	std::function<std::unique_ptr<class GSFrameBase>()> get_gs_frame;
+	std::function<void()> init_gs_render;
+	std::function<std::shared_ptr<class AudioBackend>()> get_audio;
+	std::function<std::shared_ptr<class MsgDialogBase>()> get_msg_dialog;
+	std::function<std::shared_ptr<class OskDialogBase>()> get_osk_dialog;
 	std::function<std::unique_ptr<class SaveDialogBase>()> get_save_dialog;
-};
-
-enum Status : u32
-{
-	Running,
-	Paused,
-	Stopped,
-	Ready,
-};
-
-// Emulation Stopped exception event
-class EmulationStopped {};
-
-class CPUThreadManager;
-class PadManager;
-class KeyboardManager;
-class MouseManager;
-class GSManager;
-class AudioManager;
-class CallbackManager;
-class CPUThread;
-class EventManager;
-class ModuleManager;
-struct VFS;
-
-struct EmuInfo
-{
-private:
-	friend class Emulator;
-
-	u32 m_tls_addr = 0;
-	u32 m_tls_filesz = 0;
-	u32 m_tls_memsz = 0;
-	u32 m_sdk_version = 0x360001;
-	u32 m_malloc_pagesize = 0x100000;
-	u32 m_primary_stacksize = 0x100000;
-	s32 m_primary_prio = 0x50;
-
-public:
-	EmuInfo()
-	{
-	}
+	std::function<std::unique_ptr<class TrophyNotificationBase>()> get_trophy_notification_dialog;
+	std::function<std::string(localized_string_id, const char*)> get_localized_string;
+	std::function<std::u32string(localized_string_id, const char*)> get_localized_u32string;
 };
 
 class Emulator final
 {
+	atomic_t<system_state> m_state{system_state::stopped};
+
 	EmuCallbacks m_cb;
 
-	enum Mode
-	{
-		DisAsm,
-		InterpreterDisAsm,
-		Interpreter,
-	};
-		
-	volatile u32 m_status;
-	uint m_mode;
+	atomic_t<u64> m_pause_start_time{0}; // set when paused
+	atomic_t<u64> m_pause_amend_time{0}; // increased when resumed
 
-	std::atomic<u64> m_pause_start_time; // set when paused
-	std::atomic<u64> m_pause_amend_time; // increased when resumed
+	video_renderer m_default_renderer;
+	std::string m_default_graphics_adapter;
 
-	u32 m_rsx_callback;
-	u32 m_cpu_thr_stop;
-
-	std::vector<u64> m_break_points;
-	std::vector<u64> m_marked_points;
-
-	std::mutex m_core_mutex;
-
-	std::unique_ptr<CPUThreadManager> m_thread_manager;
-	std::unique_ptr<PadManager>       m_pad_manager;
-	std::unique_ptr<KeyboardManager>  m_keyboard_manager;
-	std::unique_ptr<MouseManager>     m_mouse_manager;
-	std::unique_ptr<GSManager>        m_gs_manager;
-	std::unique_ptr<AudioManager>     m_audio_manager;
-	std::unique_ptr<CallbackManager>  m_callback_manager;
-	std::unique_ptr<EventManager>     m_event_manager;
-	std::unique_ptr<ModuleManager>    m_module_manager;
-	std::unique_ptr<VFS>              m_vfs;
-
-	EmuInfo m_info;
-	loader::loader m_loader;
-
+	std::string m_config_override_path;
 	std::string m_path;
-	std::string m_elf_path;
-	std::string m_emu_path;
+	std::string m_path_old;
 	std::string m_title_id;
 	std::string m_title;
+	std::string m_app_version;
+	std::string m_cat;
+	std::string m_dir;
+	std::string m_sfo_dir;
+	std::string m_game_dir{"PS3_GAME"};
+	std::string m_usr{"00000001"};
+	u32 m_usrid{1};
+
+	bool m_force_global_config = false;
+
+	// This flag should be adjusted before each Stop() or each BootGame() and similar because:
+	// 1. It forces an application to boot immediately by calling Run() in Load().
+	// 2. It signifies that we don't want to exit on Stop(), for example if we want to transition to another application.
+	bool m_force_boot = false;
+
+	bool m_has_gui = true;
 
 public:
-	Emulator();
+	Emulator() = default;
 
 	void SetCallbacks(EmuCallbacks&& cb)
 	{
@@ -120,43 +107,32 @@ public:
 		return m_cb;
 	}
 
-	void SendDbgCommand(DbgCommand cmd, class CPUThread* thread = nullptr)
+	// Call from the GUI thread
+	void CallAfter(std::function<void()>&& func) const
 	{
-		m_cb.send_dbg_command(cmd, thread);
+		return m_cb.call_after(std::move(func));
 	}
 
-	// returns a future object associated with the result of the function called from the GUI thread
-	template<typename F, typename RT = std::result_of_t<F()>> inline std::future<RT> CallAfter(F&& func) const
+	/** Set emulator mode to running unconditionnaly.
+	 * Required to execute various part (PPUInterpreter, memory manager...) outside of rpcs3.
+	 */
+	void SetTestMode()
 	{
-		// create task
-		auto task = std::make_shared<std::packaged_task<RT()>>(std::forward<F>(func));
-
-		// get future
-		std::future<RT> future = task->get_future();
-
-		// run asynchronously in GUI thread
-		m_cb.call_after([=]
-		{
-			(*task)();
-		});
-
-		return future;
+		m_state = system_state::running;
 	}
 
 	void Init();
-	void SetPath(const std::string& path, const std::string& elf_path = "");
-	void SetTitleID(const std::string& id);
-	void SetTitle(const std::string& title);
-	void CreateConfig(const std::string& name);
 
-	const std::string& GetPath() const
-	{
-		return m_elf_path;
-	}
+	std::vector<std::string> argv;
+	std::vector<std::string> envp;
+	std::vector<u8> data;
+	std::vector<u128> klic;
+	std::string disc;
+	std::string hdd1;
 
-	const std::string& GetEmulatorPath() const
+	const std::string& GetBoot() const
 	{
-		return m_emu_path;
+		return m_path;
 	}
 
 	const std::string& GetTitleID() const
@@ -169,99 +145,109 @@ public:
 		return m_title;
 	}
 
-	void SetEmulatorPath(const std::string& path)
+	const std::string GetTitleAndTitleID() const
 	{
-		m_emu_path = path;
+		return m_title + (m_title_id.empty() ? "" : " [" + m_title_id + "]");
 	}
+
+	const std::string& GetAppVersion() const
+	{
+		return m_app_version;
+	}
+
+	const std::string& GetCat() const
+	{
+		return m_cat;
+	}
+
+	const std::string& GetDir() const
+	{
+		return m_dir;
+	}
+
+	const std::string& GetSfoDir() const
+	{
+		return m_sfo_dir;
+	}
+
+	// String for GUI dialogs.
+	const std::string& GetUsr() const
+	{
+		return m_usr;
+	}
+
+	// u32 for cell.
+	const u32 GetUsrId() const
+	{
+		return m_usrid;
+	}
+
+	const bool SetUsr(const std::string& user);
+
+	const std::string GetBackgroundPicturePath() const;
 
 	u64 GetPauseTime()
 	{
 		return m_pause_amend_time;
 	}
 
-	std::mutex&       GetCoreMutex()       { return m_core_mutex; }
-	CPUThreadManager& GetCPU()             { return *m_thread_manager; }
-	PadManager&       GetPadManager()      { return *m_pad_manager; }
-	KeyboardManager&  GetKeyboardManager() { return *m_keyboard_manager; }
-	MouseManager&     GetMouseManager()    { return *m_mouse_manager; }
-	GSManager&        GetGSManager()       { return *m_gs_manager; }
-	AudioManager&     GetAudioManager()    { return *m_audio_manager; }
-	CallbackManager&  GetCallbackManager() { return *m_callback_manager; }
-	VFS&              GetVFS()             { return *m_vfs; }
-	std::vector<u64>& GetBreakPoints()     { return m_break_points; }
-	std::vector<u64>& GetMarkedPoints()    { return m_marked_points; }
-	EventManager&     GetEventManager()    { return *m_event_manager; }
-	ModuleManager&    GetModuleManager()   { return *m_module_manager; }
+	std::string PPUCache() const;
 
-	void ResetInfo()
-	{
-		m_info = {};
-	}
+	game_boot_result BootGame(const std::string& path, const std::string& title_id = "", bool direct = false, bool add_only = false, bool force_global_config = false);
+	bool BootRsxCapture(const std::string& path);
+	bool InstallPkg(const std::string& path);
 
-	void SetTLSData(u32 addr, u32 filesz, u32 memsz)
-	{
-		m_info.m_tls_addr = addr;
-		m_info.m_tls_filesz = filesz;
-		m_info.m_tls_memsz = memsz;
-	}
+#ifdef _WIN32
+	static std::string GetExeDir();
+#endif
 
-	void SetParams(u32 sdk_ver, u32 malloc_pagesz, u32 stacksz, s32 prio)
-	{
-		m_info.m_sdk_version = sdk_ver;
-		m_info.m_malloc_pagesize = malloc_pagesz;
-		m_info.m_primary_stacksize = stacksz;
-		m_info.m_primary_prio = prio;
-	}
+	static std::string GetEmuDir();
+	static std::string GetHddDir();
+	static std::string GetHdd1Dir();
+	static std::string GetCacheDir();
+	static std::string GetSfoDirFromGamePath(const std::string& game_path, const std::string& user, const std::string& title_id = "");
 
-	void SetRSXCallback(u32 addr)
-	{
-		m_rsx_callback = addr;
-	}
+	static std::string GetCustomConfigDir();
+	static std::string GetCustomConfigPath(const std::string& title_id, bool get_deprecated_path = false);
+	static std::string GetCustomInputConfigDir(const std::string& title_id);
+	static std::string GetCustomInputConfigPath(const std::string& title_id);
 
-	void SetCPUThreadStop(u32 addr)
-	{
-		m_cpu_thr_stop = addr;
-	}
+	void SetForceBoot(bool force_boot);
 
-	u32 GetTLSAddr() const { return m_info.m_tls_addr; }
-	u32 GetTLSFilesz() const { return m_info.m_tls_filesz; }
-	u32 GetTLSMemsz() const { return m_info.m_tls_memsz; }
-
-	u32 GetMallocPageSize() { return m_info.m_malloc_pagesize; }
-	u32 GetSDKVersion() { return m_info.m_sdk_version; }
-	u32 GetPrimaryStackSize() { return m_info.m_primary_stacksize; }
-	s32 GetPrimaryPrio() { return m_info.m_primary_prio; }
-
-	u32 GetRSXCallback() const { return m_rsx_callback; }
-	u32 GetCPUThreadStop() const { return m_cpu_thr_stop; }
-
-	bool BootGame(const std::string& path, bool direct = false);
-
-	void Load();
-	void Run();
+	game_boot_result Load(const std::string& title_id = "", bool add_only = false, bool force_global_config = false, bool is_disc_patch = false);
+	void Run(bool start_playtime);
 	bool Pause();
 	void Resume();
-	void Stop();
+	void Stop(bool restart = false);
+	void Restart() { Stop(true); }
+	bool Quit(bool force_quit);
 
-	void SavePoints(const std::string& path);
-	bool LoadPoints(const std::string& path);
+	bool IsRunning() const { return m_state == system_state::running; }
+	bool IsPaused()  const { return m_state == system_state::paused; }
+	bool IsStopped() const { return m_state == system_state::stopped; }
+	bool IsReady()   const { return m_state == system_state::ready; }
+	auto GetStatus() const { return m_state.load(); }
 
-	force_inline bool IsRunning() const { return m_status == Running; }
-	force_inline bool IsPaused()  const { return m_status == Paused; }
-	force_inline bool IsStopped() const { return m_status == Stopped; }
-	force_inline bool IsReady()   const { return m_status == Ready; }
+	bool HasGui() const { return m_has_gui; }
+	void SetHasGui(bool has_gui) { m_has_gui = has_gui; }
+
+	void SetDefaultRenderer(video_renderer renderer) { m_default_renderer = renderer; }
+	void SetDefaultGraphicsAdapter(std::string adapter) { m_default_graphics_adapter = std::move(adapter); }
+	void SetConfigOverride(std::string path) { m_config_override_path = std::move(path); }
+
+	std::string GetFormattedTitle(double fps) const;
+
+	u32 GetMaxThreads() const;
+
+	void ConfigureLogs();
+	void ConfigurePPUCache();
+
+private:
+	void LimitCacheSize();
 };
 
 extern Emulator Emu;
 
-using lv2_lock_t = std::unique_lock<std::mutex>;
-
-inline bool check_lv2_lock(lv2_lock_t& lv2_lock)
-{
-	return lv2_lock.owns_lock() && lv2_lock.mutex() == &Emu.GetCoreMutex();
-}
-
-#define LV2_LOCK lv2_lock_t lv2_lock(Emu.GetCoreMutex())
-#define LV2_DEFER_LOCK lv2_lock_t lv2_lock
-#define CHECK_LV2_LOCK(x) if (!check_lv2_lock(x)) throw EXCEPTION("lv2_lock is invalid or not locked")
-#define CHECK_EMU_STATUS if (Emu.IsStopped()) throw EmulationStopped{}
+extern bool g_use_rtm;
+extern u64 g_rtm_tx_limit1;
+extern u64 g_rtm_tx_limit2;

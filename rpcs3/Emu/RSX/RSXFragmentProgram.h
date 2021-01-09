@@ -1,6 +1,27 @@
 #pragma once
 
-enum
+#include "gcm_enums.h"
+#include "util/types.hpp"
+
+enum register_type
+{
+	RSX_FP_REGISTER_TYPE_TEMP = 0,
+	RSX_FP_REGISTER_TYPE_INPUT = 1,
+	RSX_FP_REGISTER_TYPE_CONSTANT = 2,
+	RSX_FP_REGISTER_TYPE_UNKNOWN = 3,
+};
+
+enum register_precision
+{
+	RSX_FP_PRECISION_REAL = 0,
+	RSX_FP_PRECISION_HALF = 1,
+	RSX_FP_PRECISION_FIXED12 = 2,
+	RSX_FP_PRECISION_FIXED9 = 3,
+	RSX_FP_PRECISION_SATURATE = 4,
+	RSX_FP_PRECISION_UNKNOWN = 5 // Unknown what this actually does; seems to do nothing on hwtests but then why would their compiler emit it?
+};
+
+enum fp_opcode
 {
 	RSX_FP_OPCODE_NOP        = 0x00, // No-Operation
 	RSX_FP_OPCODE_MOV        = 0x01, // Move
@@ -71,7 +92,7 @@ enum
 	RSX_FP_OPCODE_RET        = 0x45  // Return
 };
 
-static union OPDEST
+union OPDEST
 {
 	u32 HEX;
 
@@ -93,9 +114,9 @@ static union OPDEST
 		u32 no_dest          : 1;
 		u32 saturate         : 1; // _sat
 	};
-} dst;
+};
 
-static union SRC0
+union SRC0
 {
 	u32 HEX;
 
@@ -120,9 +141,9 @@ static union SRC0
 		u32 cond_mod_reg_index : 1;
 		u32 cond_reg_index     : 1;
 	};
-} src0;
+};
 
-static union SRC1
+union SRC1
 {
 	u32 HEX;
 
@@ -137,8 +158,9 @@ static union SRC1
 		u32 swizzle_w        : 2;
 		u32 neg              : 1;
 		u32 abs              : 1;
-		u32 input_mod_src0   : 3;
-		u32                  : 6;
+		u32 src0_prec_mod    : 3; // Precision modifier for src0 (many games)
+		u32 src1_prec_mod    : 3; // Precision modifier for src1 (CoD:MW series)
+		u32 src2_prec_mod    : 3; // Precision modifier for src2 (unproven, should affect MAD instruction)
 		u32 scale            : 3;
 		u32 opcode_is_branch : 1;
 	};
@@ -158,9 +180,9 @@ static union SRC1
 		u32                  : 1;
 		u32 increment        : 8; // Increment value for LOOP
 	};
-} src1;
+};
 
-static union SRC2
+union SRC2
 {
 	u32 HEX;
 
@@ -181,7 +203,7 @@ static union SRC2
 		u32 use_index_reg    : 1;
 		u32 perspective_corr : 1;
 	};
-} src2;
+};
 
 static const char* rsx_fp_input_attr_regs[] =
 {
@@ -206,16 +228,96 @@ static const std::string rsx_fp_op_names[] =
 
 struct RSXFragmentProgram
 {
-	u32 size;
-	u32 addr;
-	u32 offset;
-	u32 ctrl;
+	struct data_storage_helper
+	{
+		void* data_ptr = nullptr;
+		std::vector<char> local_storage;
+
+		data_storage_helper() = default;
+
+		data_storage_helper(void* ptr)
+		{
+			data_ptr = ptr;
+			local_storage.clear();
+		}
+
+		data_storage_helper(const data_storage_helper& other)
+		{
+			if (other.data_ptr == other.local_storage.data())
+			{
+				local_storage = other.local_storage;
+				data_ptr = local_storage.data();
+			}
+			else
+			{
+				data_ptr = other.data_ptr;
+				local_storage.clear();
+			}
+		}
+
+		void deep_copy(u32 max_length)
+		{
+			if (local_storage.empty() && data_ptr)
+			{
+				local_storage.resize(max_length);
+				std::memcpy(local_storage.data(), data_ptr, max_length);
+				data_ptr = local_storage.data();
+			}
+		}
+
+	} mutable data;
+
+	u32 offset = 0;
+	u32 ucode_length = 0;
+	u32 total_length = 0;
+	u32 ctrl = 0;
+	u16 unnormalized_coords = 0;
+	u16 redirected_textures = 0;
+	u16 shadow_textures = 0;
+	bool two_sided_lighting = false;
+	u32 texture_dimensions = 0;
+	u32 texcoord_control_mask = 0;
+
+	float texture_scale[16][4];
+
+	bool valid = false;
+
+	rsx::texture_dimension_extended get_texture_dimension(u8 id) const
+	{
+		return rsx::texture_dimension_extended{static_cast<u8>((texture_dimensions >> (id * 2)) & 0x3)};
+	}
+
+	bool texcoord_is_2d(u8 index) const
+	{
+		return !!(texcoord_control_mask & (1u << index));
+	}
+
+	bool texcoord_is_point_coord(u8 index) const
+	{
+		index += 16;
+		return !!(texcoord_control_mask & (1u << index));
+	}
 
 	RSXFragmentProgram()
-		: size(0)
-		, addr(0)
-		, offset(0)
-		, ctrl(0)
 	{
+		std::memset(texture_scale, 0, sizeof(float) * 16 * 4);
+	}
+
+	static RSXFragmentProgram clone(const RSXFragmentProgram& prog)
+	{
+		auto result = prog;
+		result.clone_data();
+		return result;
+	}
+
+	void* get_data() const
+	{
+		return data.data_ptr;
+	}
+
+	void clone_data() const
+	{
+		ensure(ucode_length);
+		data.deep_copy(ucode_length);
 	}
 };

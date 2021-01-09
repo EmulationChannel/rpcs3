@@ -1,191 +1,166 @@
-cmake_minimum_required(VERSION 2.8.12)
+﻿cmake_minimum_required(VERSION 3.8.2)
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake_modules")
-include(cotire)
-
-project(rpcs3)
+if(USE_PRECOMPILED_HEADERS AND NOT COMMAND target_precompile_headers)
+	include(cotire)
+endif()
 
 # Generate git-version.h at build time.
-add_custom_target(GitVersion ALL
-	DEPENDS something_that_never_exists)
-add_custom_command(OUTPUT something_that_never_exists
-	COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-		-P ${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
 
-if(CMAKE_COMPILER_IS_GNUCXX)
-	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9.0) # TODO: the same for (apple) clang
-		message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} is too old.")
-	endif()
-	# Warnings
-	add_compile_options(-Wno-attributes -Wno-enum-compare -Wno-invalid-offsetof)
-elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-	add_compile_options(-ftemplate-depth=1024)
-	if(APPLE)
-		add_compile_options(-stdlib=libc++)
-	endif()
-endif()
+# Check for a sufficient compiler and set build options
+include(ConfigureCompiler)
 
-if(NOT MSVC)
-	add_definitions(-DwxGUI)
-	if($ENV{CI})
-		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O1") # fix for travis gcc OoM crash. Might be fixed with the move to containers.
-	endif()
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -fexceptions -w")
-	add_compile_options(-msse -msse2 -mcx16 -mssse3)
-	if(WIN32)
-		add_compile_options(-municode -static -mwindows)
-	endif()
-else()
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHa /Zc:throwingNew /D _CRT_SECURE_NO_DEPRECATE=1 /D _CRT_NON_CONFORMING_SWPRINTFS=1 /D _SCL_SECURE_NO_WARNINGS=1")
-endif()
-
-if(APPLE)
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I/opt/X11/include")
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I/opt/X11/include")
-endif()
-
-if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+set(ADDITIONAL_LIBS "")
+if(CMAKE_SYSTEM MATCHES "Linux")
 	#on some Linux distros shm_unlink and similar functions are in librt only
-	set(ADDITIONAL_LIBS "rt" "X11")
-elseif(UNIX OR NOT MSVC)
+	set(ADDITIONAL_LIBS ${ADDITIONAL_LIBS} "rt")
+elseif(NOT MSVC AND NOT CMAKE_CXX_FLAGS MATCHES "LIBICONV_PLUG")
 	#it seems like glibc includes the iconv functions we use but other libc
 	#implementations like the one on OSX don't seem implement them
-	set(ADDITIONAL_LIBS "iconv")
-else()
-	set(ADDITIONAL_LIBS "")
+	set(ADDITIONAL_LIBS ${ADDITIONAL_LIBS} "iconv")
 endif()
 
-If(NOT RPCS3_SRC_DIR)
-  SET(RPCS3_SRC_DIR ${CMAKE_CURRENT_LIST_DIR})
-  Message("-- Initializing RPCS3_SRC_DIR=${RPCS3_SRC_DIR}")
-Else()
-  Message("-- Using Custom RPCS3_SRC_DIR=${RPCS3_SRC_DIR}")
-EndIf()
-
-set(CMAKE_MODULE_PATH "${RPCS3_SRC_DIR}/cmake_modules")
-
-if(NOT WIN32)
-	add_definitions(-DGL_GLEXT_PROTOTYPES)
-	add_definitions(-DGLX_GLXEXT_PROTOTYPES)
-endif()
-
-find_package(wxWidgets COMPONENTS core base net aui gl xml REQUIRED)
-if(NOT MSVC)
-	if(APPLE)
-		find_path(GLEW_INCLUDE_DIR GL/glew.h
-			/usr/include/GL
-			/usr/openwin/share/include
-			/usr/openwin/include
-			/usr/X11R6/include
-			/usr/include/X11
-			/opt/graphics/OpenGL/include
-			/opt/graphics/OpenGL/contrib/libglew
-			/usr/local/include
-		)
+if(UNIX AND NOT APPLE)
+	# Optionally enable X11 for window management
+	find_package(X11)
+	if(X11_FOUND)
+		add_definitions(-DHAVE_X11)
 	endif()
-	find_package(GLEW REQUIRED)
-	find_package(ZLIB REQUIRED)
 endif()
-find_package(OpenGL REQUIRED)
-find_package(OpenAL REQUIRED)
-find_package(LLVM CONFIG)
 
-include("${wxWidgets_USE_FILE}")
-
-if(APPLE)
-	set(PLATFORM_ARCH "macosx/x86_64")
-elseif(WIN32)
-	set(PLATFORM_ARCH "Windows/x86_64")
+if(NOT RPCS3_SRC_DIR)
+	set(RPCS3_SRC_DIR ${CMAKE_CURRENT_LIST_DIR})
+	message("-- Initializing RPCS3_SRC_DIR=${RPCS3_SRC_DIR}")
 else()
-	set(PLATFORM_ARCH "linux/x86_64")
+	message("-- Using Custom RPCS3_SRC_DIR=${RPCS3_SRC_DIR}")
 endif()
 
-include_directories(
-${GLEW_INCLUDE_DIR}
-${wxWidgets_INCLUDE_DIRS}
-${OPENAL_INCLUDE_DIR}
-${LLVM_INCLUDE_DIRS}
-"${RPCS3_SRC_DIR}/../ffmpeg/${PLATFORM_ARCH}/include"
-"${RPCS3_SRC_DIR}"
-"${RPCS3_SRC_DIR}/Loader"
-"${RPCS3_SRC_DIR}/Crypto"
-"${RPCS3_SRC_DIR}/.."
-"${RPCS3_SRC_DIR}/../asmjit/src/asmjit"
-"${RPCS3_SRC_DIR}/../glm"
+# Qt5
+# finds Qt libraries and setups custom commands for MOC and UIC
+# Must be done here because generated MOC and UIC targets cant
+# be found otherwise
+include(${CMAKE_SOURCE_DIR}/3rdparty/qt5.cmake)
+
+# subdirectories
+add_subdirectory(Emu)
+add_subdirectory(rpcs3qt)
+
+set(RPCS3_SRC
+	display_sleep_control.cpp
+	headless_application.cpp
+	main.cpp
+	main_application.cpp
+	rpcs3_version.cpp
+	stb_image.cpp
+	stdafx.cpp
+
+	Input/basic_keyboard_handler.cpp
+	Input/basic_mouse_handler.cpp
+	Input/ds3_pad_handler.cpp
+	Input/ds4_pad_handler.cpp
+	Input/dualsense_pad_handler.cpp
+	Input/evdev_joystick_handler.cpp
+	Input/keyboard_pad_handler.cpp
+	Input/mm_joystick_handler.cpp
+	Input/pad_thread.cpp
+	Input/xinput_pad_handler.cpp
 )
+
 if(WIN32)
-	include_directories(BEFORE "${RPCS3_SRC_DIR}/../minidx9/Include")
-	include_directories(BEFORE "${RPCS3_SRC_DIR}/../minidx12/Include")
-endif()
-
-if(LLVM_FOUND)
-	add_definitions(${LLVM_DEFINITIONS})
-	add_definitions(-DLLVM_AVAILABLE)
-	if (CMAKE_BUILD_TYPE STREQUAL "Release")
-		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize x86codegen x86disassembler)
-	else()
-		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize x86codegen x86disassembler mcdisassembler)
-	endif()
-	if(MSVC)
-		set_source_files_properties(${RPCS3_SRC_DIR}/Emu/Cell/PPULLVMRecompiler.cpp PROPERTIES COMPILE_FLAGS /GR-)
-	else()
-		set_source_files_properties(${RPCS3_SRC_DIR}/Emu/Cell/PPULLVMRecompiler.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
-	endif()
-endif()
-
-link_directories("${RPCS3_SRC_DIR}/../asmjit/" "${RPCS3_SRC_DIR}/../minidx12/")
-
-if(MSVC OR NOT WIN32)
-	link_directories("${RPCS3_SRC_DIR}/../ffmpeg/${PLATFORM_ARCH}/lib")
-endif()
-
-get_property(dirs DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES)
-foreach(dir ${dirs})
-  message(STATUS "dir='${dir}'")
-endforeach()
-
-file(
-GLOB_RECURSE
-RPCS3_SRC
-"${RPCS3_SRC_DIR}/rpcs3.cpp"
-"${RPCS3_SRC_DIR}/config.cpp"
-"${RPCS3_SRC_DIR}/../Utilities/GNU.cpp"
-"${RPCS3_SRC_DIR}/Emu/*"
-"${RPCS3_SRC_DIR}/Gui/*"
-"${RPCS3_SRC_DIR}/Loader/*"
-"${RPCS3_SRC_DIR}/Crypto/*"
-"${RPCS3_SRC_DIR}/../Utilities/*"
-)
-
-add_executable(rpcs3 ${RPCS3_SRC})
-
-
-if(NOT MSVC)
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -L${CMAKE_CURRENT_BINARY_DIR}/../asmjit/") #hack because the asmjit cmake file force fno exceptions upd: not sure if vs2015 build is affected
+	add_executable(rpcs3 WIN32 ${RPCS3_SRC})
+elseif(APPLE)
+	add_executable(rpcs3 MACOSX_BUNDLE ${RPCS3_SRC} "${RPCS3_SRC_DIR}/rpcs3.icns")
+	set_target_properties(rpcs3
+		PROPERTIES
+			MACOSX_BUNDLE_INFO_PLIST "${RPCS3_SRC_DIR}/rpcs3.plist.in")
 else()
-	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /NODEFAULTLIB:libc.lib /NODEFAULTLIB:libcmt.lib /NODEFAULTLIB:libcd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrtd.lib")
+	add_executable(rpcs3 ${RPCS3_SRC})
 endif()
-if(WIN32) # I'm not sure we need all of these libs, but we link them in vs
-	target_link_libraries(rpcs3  odbc32.lib odbccp32.lib comctl32.lib ws2_32.lib shlwapi.lib winmm.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib Iphlpapi.lib)
-	if(LLVM_FOUND)
-		target_link_libraries(rpcs3  ${LLVM_LIBS})
-	endif()
-	if(NOT MSVC)
-		target_link_libraries(rpcs3  ${OPENGL_LIBRARIES} ${GLEW_LIBRARY} opengl32.lib glu32.lib)
-	else()
-		target_link_libraries(rpcs3  dxgi.lib d2d1.lib dwrite.lib)
-	endif()
-	target_link_libraries(rpcs3  asmjit.lib avformat.lib avcodec.lib avutil.lib swresample.lib swscale.lib ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${ADDITIONAL_LIBS})
+
+gen_git_version(${RPCS3_SRC_DIR})
+set_target_properties(rpcs3
+	PROPERTIES
+		AUTOMOC ON
+		AUTOUIC ON)
+
+target_link_libraries(rpcs3 rpcs3_emu rpcs3_ui)
+target_link_libraries(rpcs3 3rdparty::discord-rpc 3rdparty::qt5 3rdparty::hidapi 3rdparty::libusb 3rdparty::wolfssl)
+target_link_libraries(rpcs3 ${ADDITIONAL_LIBS})
+
+# Win resource file
+if (WIN32)
+	target_sources(rpcs3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/rpcs3.rc")
+endif()
+
+# Unix display manager
+if(X11_FOUND)
+	target_include_directories(rpcs3 PUBLIC ${X11_INCLUDE_DIR})
+	target_link_libraries(rpcs3 ${X11_LIBRARIES})
+elseif(USE_VULKAN AND UNIX AND NOT WAYLAND_FOUND AND NOT APPLE)
+	# Wayland has been checked in 3rdparty/CMakeLists.txt already.
+	message(FATAL_ERROR "RPCS3 requires either X11 or Wayland (or both) for Vulkan.")
+endif()
+
+if(UNIX)
+	set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+	find_package(Threads REQUIRED)
+	target_link_libraries(rpcs3 Threads::Threads)
+endif()
+
+if(WIN32)
+	target_link_libraries(rpcs3 ws2_32.lib Iphlpapi.lib Winmm.lib Psapi.lib gdi32.lib setupapi.lib)
 else()
-	if(LLVM_FOUND)
-		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES})
-		target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${ZLIB_LIBRARIES} ${LLVM_LIBS} ${ADDITIONAL_LIBS})
-	else()
-		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES})
-		target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${ZLIB_LIBRARIES} ${ADDITIONAL_LIBS})
-    endif()
+	target_link_libraries(rpcs3 ${CMAKE_DL_LIBS})
 endif()
 
-set_target_properties(rpcs3 PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h")
-cotire(rpcs3)
+if(USE_PRECOMPILED_HEADERS)
+	if(COMMAND target_precompile_headers)
+		target_precompile_headers(rpcs3 PRIVATE "${RPCS3_SRC_DIR}/stdafx.h")
+	else()
+		set_target_properties(rpcs3 PROPERTIES
+			COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h"
+			COTIRE_ADD_UNITY_BUILD OFF)
 
+		cotire(rpcs3)
+	endif()
+endif()
+
+# Copy icons to executable directory
+if(APPLE)
+	add_custom_command(TARGET rpcs3 POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy
+			${RPCS3_SRC_DIR}/rpcs3.icns $<TARGET_FILE_DIR:rpcs3>/../Resources/rpcs3.icns
+			COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/bin/Icons $<TARGET_FILE_DIR:rpcs3>/../Resources/Icons
+			COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/bin/GuiConfigs $<TARGET_FILE_DIR:rpcs3>/../Resources/GuiConfigs
+			COMMAND "${Qt5_DIR}/../../../bin/macdeployqt" "${PROJECT_BINARY_DIR}/bin/rpcs3.app")
+elseif(UNIX)
+	add_custom_command(TARGET rpcs3 POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/bin/Icons $<TARGET_FILE_DIR:rpcs3>/Icons)
+elseif(WIN32)
+	add_custom_command(TARGET rpcs3 POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/bin" "$<TARGET_FILE_DIR:rpcs3>"
+			COMMAND "${Qt5_DIR}/../../../bin/windeployqt" --no-angle --no-compiler-runtime --no-opengl-sw --no-patchqt --no-svg --no-translations --no-quick --plugindir "$<TARGET_FILE_DIR:rpcs3>/qt/plugins" --release "$<TARGET_FILE:rpcs3>")
+endif()
+
+# Unix installation
+if(UNIX AND NOT APPLE)
+	# Install the binary
+	install(TARGETS rpcs3 RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
+	# Install the application icon and menu item
+	install(FILES rpcs3.svg
+		DESTINATION ${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/scalable/apps)
+	install(FILES rpcs3.png
+		DESTINATION ${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/48x48/apps)
+	install(FILES rpcs3.desktop
+		DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications)
+	install(FILES rpcs3.appdata.xml
+			DESTINATION ${CMAKE_INSTALL_PREFIX}/share/metainfo)
+	# Install other files
+	install(DIRECTORY ../bin/Icons
+		DESTINATION ${CMAKE_INSTALL_PREFIX}/share/rpcs3)
+	install(DIRECTORY ../bin/GuiConfigs
+		DESTINATION ${CMAKE_INSTALL_PREFIX}/share/rpcs3)
+endif()

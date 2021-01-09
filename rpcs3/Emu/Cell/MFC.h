@@ -1,8 +1,8 @@
 #pragma once
 
-const char* get_mfc_cmd_name(u32 cmd);
+#include "util/types.hpp"
 
-enum : u32
+enum MFC : u8
 {
 	MFC_PUT_CMD      = 0x20, MFC_PUTB_CMD     = 0x21, MFC_PUTF_CMD     = 0x22,
 	MFC_PUTS_CMD     = 0x28, MFC_PUTBS_CMD    = 0x29, MFC_PUTFS_CMD    = 0x2a,
@@ -27,10 +27,16 @@ enum : u32
 	MFC_LIST_MASK    = 0x04,
 	MFC_START_MASK   = 0x08,
 	MFC_RESULT_MASK  = 0x10, // ???
+
+	MFC_SDCRT_CMD   = 0x80,
+	MFC_SDCRTST_CMD = 0x81,
+	MFC_SDCRZ_CMD   = 0x89,
+	MFC_SDCRS_CMD   = 0x8D,
+	MFC_SDCRF_CMD   = 0x8F,
 };
 
 // Atomic Status Update
-enum : u32
+enum mfc_atomic_status : u32
 {
 	MFC_PUTLLC_SUCCESS = 0,
 	MFC_PUTLLC_FAILURE = 1, // reservation was lost
@@ -39,7 +45,7 @@ enum : u32
 };
 
 // MFC Write Tag Status Update Request Channel (ch23) operations
-enum : u32
+enum mfc_tag_update : u32
 {
 	MFC_TAG_UPDATE_IMMEDIATE = 0,
 	MFC_TAG_UPDATE_ANY       = 1,
@@ -64,29 +70,28 @@ enum : u32
 	MFC_SPU_MAX_QUEUE_SPACE                 = 0x10,
 };
 
-struct spu_mfc_arg_t
+enum : u32
 {
-	union
-	{
-		u64 ea;
+	MFC_DMA_TAG_STATUS_UPDATE_EVENT    = 0x00000001,
+	MFC_DMA_TAG_CMD_STALL_NOTIFY_EVENT = 0x00000002,
+	MFC_DMA_QUEUE_VACANCY_EVENT        = 0x00000008,
+	MFC_SPU_MAILBOX_WRITTEN_EVENT      = 0x00000010,
+	MFC_DECREMENTER_EVENT              = 0x00000020,
+	MFC_PU_INT_MAILBOX_AVAIL_EVENT     = 0x00000040,
+	MFC_PU_MAILBOX_AVAIL_EVENT         = 0x00000080,
+	MFC_SIGNAL_2_EVENT                 = 0x00000100,
+	MFC_SIGNAL_1_EVENT                 = 0x00000200,
+	MFC_LLR_LOST_EVENT                 = 0x00000400,
+	MFC_PRIV_ATTN_EVENT                = 0x00000800,
+	MFC_MULTISOURCE_SYNC_EVENT         = 0x00001000,
+};
 
-		struct
-		{
-			u32 eal;
-			u32 eah;
-		};
-	};
-
+struct alignas(16) spu_mfc_cmd
+{
+	MFC cmd;
+	u8 tag;
+	u16 size;
 	u32 lsa;
-
-	union
-	{
-		struct
-		{
-			u16 tag;
-			u16 size;
-		};
-
-		u32 size_tag;
-	};
+	u32 eal;
+	u32 eah;
 };

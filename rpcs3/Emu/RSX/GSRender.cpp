@@ -1,28 +1,17 @@
 #include "stdafx.h"
-#include "Emu/Memory/Memory.h"
-#include "Emu/System.h"
 
-#include "GSManager.h"
 #include "GSRender.h"
 
-
-draw_context_t GSFrameBase::new_context()
+GSRender::GSRender()
 {
-	if (void* context = make_context())
+	if (auto gs_frame = Emu.GetCallbacks().get_gs_frame())
 	{
-		return std::shared_ptr<void>(context, [this](void* ctxt) { delete_context(ctxt); });
+		m_frame = gs_frame.release();
 	}
-
-	return nullptr;
-}
-
-void GSFrameBase::title_message(const std::wstring& msg)
-{
-	m_title_message = msg;
-}
-
-GSRender::GSRender(frame_type type) : m_frame(Emu.GetCallbacks().get_gs_frame(type).release())
-{
+	else
+	{
+		m_frame = nullptr;
+	}
 }
 
 GSRender::~GSRender()
@@ -31,11 +20,12 @@ GSRender::~GSRender()
 
 	if (m_frame)
 	{
+		m_frame->hide();
 		m_frame->close();
 	}
 }
 
-void GSRender::oninit()
+void GSRender::on_init_rsx()
 {
 	if (m_frame)
 	{
@@ -43,30 +33,30 @@ void GSRender::oninit()
 	}
 }
 
-void GSRender::oninit_thread()
+void GSRender::on_init_thread()
 {
 	if (m_frame)
 	{
-		m_context = m_frame->new_context();
+		m_context = m_frame->make_context();
 		m_frame->set_current(m_context);
 	}
 }
 
-void GSRender::close()
-{
-	if (m_frame && m_frame->shown())
-	{
-		m_frame->hide();
-	}
-
-	if (joinable())
-	{
-		join();
-	}
-}
-
-void GSRender::flip(int buffer)
+void GSRender::on_exit()
 {
 	if (m_frame)
+	{
+		m_frame->delete_context(m_context);
+		m_context = nullptr;
+	}
+
+	rsx::thread::on_exit();
+}
+
+void GSRender::flip(const rsx::display_flip_info_t& info)
+{
+	if (m_frame)
+	{
 		m_frame->flip(m_context);
+	}
 }
